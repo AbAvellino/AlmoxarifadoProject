@@ -344,14 +344,20 @@ else:
 
         df_prod = buscar_produtos()
 
+        # Tratamento para evitar o KeyError quando o banco está vazio
+        if not df_prod.empty:
+            df_prod['Status'] = df_prod['quantidade'].apply(lambda x: "⚠️ REPOR" if x < 5 else "OK")
+        else:
+            df_prod['Status'] = pd.Series(dtype='str')
+
         busca = st.text_input("🔍 Buscar produto pelo nome:")
         if busca and not df_prod.empty:
             df_prod = df_prod[df_prod['nome'].str.contains(busca, case=False, na=False)]
 
-        if not df_prod.empty:
-            df_prod['Status'] = df_prod['quantidade'].apply(lambda x: "⚠️ REPOR" if x < 5 else "OK")
-
         st.dataframe(df_prod[['id', 'nome', 'categoria', 'quantidade', 'Status']], use_container_width=True)
+
+        if df_prod.empty:
+            st.info("Nenhum produto cadastrado no momento. Acesse '➕ Cadastrar Produto' ou '📥 Importar Dados' para começar!")
 
         st.subheader("🖼️ Galeria Visual de Produtos")
         if not df_prod.empty:
@@ -389,8 +395,6 @@ else:
                         st.rerun()
                     else:
                         st.error(msg)
-        else:
-            st.info("Nenhum produto cadastrado.")
 
         if st.session_state.perfil == "Admin" and not df_prod.empty:
             st.write("---")
