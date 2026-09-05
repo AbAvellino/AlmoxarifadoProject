@@ -1,17 +1,17 @@
 import hashlib
 import os
-import sqlite3
 import uuid
 import xml.etree.ElementTree as ET
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+import psycopg2
 from PIL import Image
 
 # Configuração da página Streamlit
 st.set_page_config(page_title="Sistema de Almoxarifado", layout="wide", page_icon="📦")
 
-# Criar pasta para salvar imagens do sistema e produtos
+# Criar pasta para salvar imagens temporárias ou locais se necessário
 if not os.path.exists("uploads"):
     os.makedirs("uploads")
 
@@ -38,7 +38,6 @@ EXTENSOES_PERMITIDAS_IMAGEM = {".jpg", ".jpeg", ".png", ".webp"}
 EXTENSOES_PERMITIDAS_XML = {".xml"}
 
 def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem") -> str:
-    """Salva arquivos com nomes sanitizados (UUIDv4) contra vulnerabilidades de Path Traversal."""
     if uploaded_file is None:
         return ""
 
@@ -57,96 +56,89 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
 
     return caminho_completo
 
-# --- CONEXÃO E INICIALIZAÇÃO DO BANCO DE DADOS ---
+# --- CONEXÃO E INICIALIZAÇÃO DO BANCO DE DADOS (SUPABASE POSTGRESQL) ---
 
-DB_NAME = "almoxarifado.db"
+SUPABASE_DB_URL = st.secrets.get(
+    "SUPABASE_DB_URL", 
+    "postgresql://postgres:SUA_SENHA@db.SEU_PROJETO.supabase.co:5432/postgres"
+)
 
 def conectar():
-    return sqlite3.connect(DB_NAME)
+    """Conecta ao banco de dados PostgreSQL hospedado no Supabase."""
+    return psycopg2.connect(SUPABASE_DB_URL)
 
 def inicializar_banco():
     with conectar() as conn:
-        cursor = conn.cursor()
-        
-        # Configurações da Empresa
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS configuracoes (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                nome_empresa TEXT DEFAULT 'Sistema de Almoxarifado',
-                logo_path TEXT DEFAULT '',
-                cor_tema TEXT DEFAULT '#2196F3'
-            )
-        """)
-        cursor.execute("INSERT OR IGNORE INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado')")
+        with conn.cursor() as cursor:
+            # Configurações da Empresa
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS configuracoes (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    nome_empresa TEXT DEFAULT 'Sistema de Almoxarifado',
+                    logo_path TEXT DEFAULT '',
+                    cor_tema TEXT DEFAULT '#2196F3'
+                );
+            """)
+            cursor.execute("INSERT INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado') ON CONFLICT (id) DO NOTHING;")
 
-        # Produtos (Com suporte a Unidade de Medida e Qtd por Caixa)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS produtos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT NOT NULL,
-                categoria TEXT DEFAULT 'Geral',
-                quantidade REAL NOT NULL DEFAULT 0,
-                unidade_medida TEXT DEFAULT 'Caixa',
-                qtd_por_caixa INTEGER DEFAULT 1,
-                foto_path TEXT DEFAULT ''
-            )
-        """)
-        
-        # Migrações seguras de colunas caso a tabela antiga já exista
-        colunas_existentes = [col[1] for col in cursor.execute("PRAGMA table_info(produtos)").fetchall()]
-        if "unidade_medida" not in colunas_existentes:
-            cursor.execute("ALTER TABLE produtos ADD COLUMN unidade_medida TEXT DEFAULT 'Caixa'")
-        if "qtd_por_caixa" not in colunas_existentes:
-            cursor.execute("ALTER TABLE produtos ADD COLUMN qtd_por_caixa INTEGER DEFAULT 1")
-        if "foto_path" not in colunas_existentes:
-            cursor.execute("ALTER TABLE produtos ADD COLUMN foto_path TEXT DEFAULT ''")
+            # Produtos
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS produtos (
+                    id SERIAL PRIMARY KEY,
+                    nome TEXT NOT NULL,
+                    categoria TEXT DEFAULT 'Geral',
+                    quantidade REAL NOT NULL DEFAULT 0,
+                    unidade_medida TEXT DEFAULT 'Caixa',
+                    qtd_por_caixa INTEGER DEFAULT 1,
+                    foto_path TEXT DEFAULT ''
+                );
+            """)
 
-        # Histórico
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS historico (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                produto_id INTEGER NOT NULL,
-                tipo TEXT NOT NULL,
-                quantidade REAL NOT NULL,
-                usuario TEXT DEFAULT 'Sistema',
-                data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (produto_id) REFERENCES produtos (id)
-            )
-        """)
+            # Histórico
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS historico (
+                    id SERIAL PRIMARY KEY,
+                    produto_id INTEGER REFERENCES produtos(id) ON DELETE CASCADE,
+                    tipo TEXT NOT NULL,
+                    quantidade REAL NOT NULL,
+                    usuario TEXT DEFAULT 'Sistema',
+                    data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-        # Usuários
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario TEXT UNIQUE NOT NULL,
-                senha TEXT NOT NULL,
-                perfil TEXT NOT NULL
-            )
-        """)
+            # Usuários
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios (
+                    id SERIAL PRIMARY KEY,
+                    usuario TEXT UNIQUE NOT NULL,
+                    senha TEXT NOT NULL,
+                    perfil TEXT NOT NULL
+                );
+            """)
 
-        # Notas Fiscais
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS notas_fiscais (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                numero_nf TEXT NOT NULL,
-                fornecedor TEXT NOT NULL,
-                cnpj_fornecedor TEXT DEFAULT '',
-                produto_nome TEXT NOT NULL,
-                quantidade REAL NOT NULL,
-                valor_unitario REAL DEFAULT 0.0,
-                valor_total REAL DEFAULT 0.0,
-                data_recebimento DATETIME DEFAULT CURRENT_TIMESTAMP,
-                usuario TEXT DEFAULT 'Sistema'
-            )
-        """)
+            # Notas Fiscais
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notas_fiscais (
+                    id SERIAL PRIMARY KEY,
+                    numero_nf TEXT NOT NULL,
+                    fornecedor TEXT NOT NULL,
+                    cnpj_fornecedor TEXT DEFAULT '',
+                    produto_nome TEXT NOT NULL,
+                    quantidade REAL NOT NULL,
+                    valor_unitario REAL DEFAULT 0.0,
+                    valor_total REAL DEFAULT 0.0,
+                    data_recebimento TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    usuario TEXT DEFAULT 'Sistema'
+                );
+            """)
 
-        # Criar usuários padrão com Hash Seguro se o banco estiver vazio
-        cursor.execute("SELECT COUNT(*) FROM usuarios")
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", ("admin", gerar_hash_senha("1234"), "Admin"))
-            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", ("operador", gerar_hash_senha("1234"), "Operador"))
+            # Usuários padrões caso não existam
+            cursor.execute("SELECT COUNT(*) FROM usuarios")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("admin", gerar_hash_senha("1234"), "Admin"))
+                cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("operador", gerar_hash_senha("1234"), "Operador"))
 
-        conn.commit()
+            conn.commit()
 
 inicializar_banco()
 
@@ -154,66 +146,64 @@ inicializar_banco()
 
 def buscar_configuracoes():
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT nome_empresa, logo_path, cor_tema FROM configuracoes WHERE id = 1")
-        res = cursor.fetchone()
-        return {"nome_empresa": res[0], "logo_path": res[1], "cor_tema": res[2]} if res else {"nome_empresa": "Sistema de Almoxarifado", "logo_path": "", "cor_tema": "#2196F3"}
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT nome_empresa, logo_path, cor_tema FROM configuracoes WHERE id = 1")
+            res = cursor.fetchone()
+            return {"nome_empresa": res[0], "logo_path": res[1], "cor_tema": res[2]} if res else {"nome_empresa": "Sistema de Almoxarifado", "logo_path": "", "cor_tema": "#2196F3"}
 
 def salvar_configuracoes(nome, logo_path, cor):
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE configuracoes SET nome_empresa = ?, logo_path = ?, cor_tema = ? WHERE id = 1", (nome, logo_path, cor))
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE configuracoes SET nome_empresa = %s, logo_path = %s, cor_tema = %s WHERE id = 1", (nome, logo_path, cor))
+            conn.commit()
 
-# --- FUNÇÕES DE NEGÓCIO E LÓGICA SQL ---
+# --- FUNÇÕES DE NEGÓCIO E LÓGICA POSTGRESQL (SUPABASE) ---
 
 def autenticar_usuario(usuario, senha_digitada):
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT perfil, senha FROM usuarios WHERE usuario = ?", (usuario,))
-        res = cursor.fetchone()
-        
-        if res:
-            perfil, hash_senha = res
-            # Compatibilidade automática: se a senha for antiga em texto puro, converte para Hash
-            if ":" not in hash_senha:
-                if senha_digitada == hash_senha:
-                    novo_hash = gerar_hash_senha(senha_digitada)
-                    cursor.execute("UPDATE usuarios SET senha = ? WHERE usuario = ?", (novo_hash, usuario))
-                    conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT perfil, senha FROM usuarios WHERE usuario = %s", (usuario,))
+            res = cursor.fetchone()
+            
+            if res:
+                perfil, hash_senha = res
+                if ":" not in hash_senha:
+                    if senha_digitada == hash_senha:
+                        novo_hash = gerar_hash_senha(senha_digitada)
+                        cursor.execute("UPDATE usuarios SET senha = %s WHERE usuario = %s", (novo_hash, usuario))
+                        conn.commit()
+                        return perfil
+                elif verificar_senha(senha_digitada, hash_senha):
                     return perfil
-            elif verificar_senha(senha_digitada, hash_senha):
-                return perfil
-                
-        return None
+            return None
 
 def buscar_produtos():
     with conectar() as conn:
-        return pd.read_sql_query("SELECT id, nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path FROM produtos", conn)
+        return pd.read_sql_query("SELECT id, nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path FROM produtos ORDER BY id ASC", conn)
 
 def cadastrar_produto(nome, categoria, quantidade, unidade_medida="Caixa", qtd_por_caixa=1, foto_path=""):
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO produtos (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path) VALUES (?, ?, ?, ?, ?, ?)", 
-            (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path)
-        )
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO produtos (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path) VALUES (%s, %s, %s, %s, %s, %s)", 
+                (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path)
+            )
+            conn.commit()
 
 def editar_produto(prod_id, nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path=""):
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE produtos SET nome = ?, categoria = ?, quantidade = ?, unidade_medida = ?, qtd_por_caixa = ?, foto_path = ? WHERE id = ?", 
-            (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path, prod_id)
-        )
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE produtos SET nome = %s, categoria = %s, quantidade = %s, unidade_medida = %s, qtd_por_caixa = %s, foto_path = %s WHERE id = %s", 
+                (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path, prod_id)
+            )
+            conn.commit()
 
 def excluir_produto(prod_id):
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM produtos WHERE id = ?", (prod_id,))
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM produtos WHERE id = %s", (prod_id,))
+            conn.commit()
 
 def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado):
     if tipo == "SAÍDA" and qtd_mov > qtd_atual:
@@ -222,41 +212,41 @@ def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado):
     nova_qtd = qtd_atual + qtd_mov if tipo == "ENTRADA" else qtd_atual - qtd_mov
 
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE produtos SET quantidade = ? WHERE id = ?", (nova_qtd, prod_id))
-        cursor.execute(
-            "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (?, ?, ?, ?)",
-            (prod_id, tipo, qtd_mov, usuario_logado)
-        )
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
+            cursor.execute(
+                "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (%s, %s, %s, %s)",
+                (prod_id, tipo, qtd_mov, usuario_logado)
+            )
+            conn.commit()
     return True, "Movimentação realizada com sucesso!"
 
 def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, usuario_logado, categoria="Geral"):
     valor_total = qtd_mov * valor_unit
 
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, quantidade FROM produtos WHERE LOWER(nome) = LOWER(?)", (nome_prod.strip(),))
-        res_prod = cursor.fetchone()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id, quantidade FROM produtos WHERE LOWER(nome) = LOWER(%s)", (nome_prod.strip(),))
+            res_prod = cursor.fetchone()
 
-        if res_prod:
-            prod_id, qtd_atual = res_prod
-            nova_qtd = qtd_atual + qtd_mov
-            cursor.execute("UPDATE produtos SET quantidade = ? WHERE id = ?", (nova_qtd, prod_id))
-        else:
-            cursor.execute("INSERT INTO produtos (nome, categoria, quantidade) VALUES (?, ?, ?)", (nome_prod.strip(), categoria, qtd_mov))
-            prod_id = cursor.lastrowid
+            if res_prod:
+                prod_id, qtd_atual = res_prod
+                nova_qtd = qtd_atual + qtd_mov
+                cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
+            else:
+                cursor.execute("INSERT INTO produtos (nome, categoria, quantidade) VALUES (%s, %s, %s) RETURNING id", (nome_prod.strip(), categoria, qtd_mov))
+                prod_id = cursor.fetchone()[0]
 
-        cursor.execute("""
-            INSERT INTO notas_fiscais (numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, valor_unitario, valor_total, usuario)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, valor_total, usuario_logado))
+            cursor.execute("""
+                INSERT INTO notas_fiscais (numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, valor_unitario, valor_total, usuario)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, valor_total, usuario_logado))
 
-        cursor.execute(
-            "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (?, ?, ?, ?)",
-            (prod_id, f"ENTRADA (NF {numero_nf})", qtd_mov, usuario_logado)
-        )
-        conn.commit()
+            cursor.execute(
+                "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (%s, %s, %s, %s)",
+                (prod_id, f"ENTRADA (NF {numero_nf})", qtd_mov, usuario_logado)
+            )
+            conn.commit()
     return True
 
 def processar_xml_nfe(xml_file):
@@ -310,31 +300,31 @@ def buscar_notas_fiscais():
 
 def buscar_usuarios():
     with conectar() as conn:
-        return pd.read_sql_query("SELECT id, usuario, perfil FROM usuarios", conn)
+        return pd.read_sql_query("SELECT id, usuario, perfil FROM usuarios ORDER BY id ASC", conn)
 
 def cadastrar_usuario(usuario, senha, perfil):
     try:
         hash_s = gerar_hash_senha(senha)
         with conectar() as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", (usuario, hash_s, perfil))
-            conn.commit()
-            return True, f"Usuário '{usuario}' cadastrado com sucesso!"
-    except sqlite3.IntegrityError:
-        return False, "Usuário já existe!"
+            with conn.cursor() as cursor:
+                cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", (usuario, hash_s, perfil))
+                conn.commit()
+                return True, f"Usuário '{usuario}' cadastrado com sucesso!"
+    except Exception as e:
+        return False, f"Erro ao cadastrar usuário: {e}"
 
 def alterar_senha_usuario(usr_id, nova_senha):
     hash_s = gerar_hash_senha(nova_senha)
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE usuarios SET senha = ? WHERE id = ?", (hash_s, usr_id))
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE usuarios SET senha = %s WHERE id = %s", (hash_s, usr_id))
+            conn.commit()
 
 def excluir_usuario(usr_id):
     with conectar() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM usuarios WHERE id = ?", (usr_id,))
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM usuarios WHERE id = %s", (usr_id,))
+            conn.commit()
 
 def buscar_historico():
     with conectar() as conn:
@@ -402,7 +392,6 @@ else:
 
     opcao = st.sidebar.radio("Navegação", opcoes_menu)
 
-    # Logout seguro limpando todo o session_state
     if st.sidebar.button("Sair / Logout"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
@@ -417,11 +406,11 @@ else:
         if not df_prod.empty:
             df_prod['Status'] = df_prod['quantidade'].apply(lambda x: "⚠️ REPOR" if x < 5 else "OK")
             
-            # Cálculo dinâmico do saldo formatado para exibição visual do usuário
+            # Cálculo dinâmico do saldo formatado e cálculo exato das Caixas em Estoque
             def formatar_saldo(row):
                 if row['unidade_medida'] == 'Caixa':
                     qtd_cx = row['quantidade'] / row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 0
-                    return f"{row['quantidade']:.0f} itens ({qtd_cx:.2f} CX)"
+                    return f"{row['quantidade']:.0f} un ({qtd_cx:.2f} CX)"
                 else:
                     return f"{row['quantidade']:.2f} Mts"
 
@@ -611,7 +600,7 @@ else:
                     st.write("### Pré-visualização dos dados:")
                     st.dataframe(df_imp, use_container_width=True)
 
-                    if st.button("🚀 Confirmar e Importar para o Banco de Dados", type="primary"):
+                    if st.button("🚀 Confirmar e Importar para o Supabase", type="primary"):
                         qtd_importados = 0
                         for idx, row in df_imp.iterrows():
                             cadastrar_produto(
@@ -622,7 +611,7 @@ else:
                                 int(row.get('qtd_por_caixa', 1))
                             )
                             qtd_importados += 1
-                        st.success(f"{qtd_importados} produtos cadastrados com sucesso!")
+                        st.success(f"{qtd_importados} produtos cadastrados no Supabase com sucesso!")
                         st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao ler arquivo Excel. Verifique o formato e as colunas: {e}")
@@ -639,7 +628,7 @@ else:
                     st.write("### Dados carregados da nuvem:")
                     st.dataframe(df_gsheets, use_container_width=True)
 
-                    if st.button("📥 Importar Dados do Google Sheets", type="primary"):
+                    if st.button("📥 Importar Dados para o Supabase", type="primary"):
                         qtd_importados = 0
                         for idx, row in df_gsheets.iterrows():
                             cadastrar_produto(
@@ -650,7 +639,7 @@ else:
                                 int(row.get('qtd_por_caixa', 1))
                             )
                             qtd_importados += 1
-                        st.success(f"{qtd_importados} produtos importados do Google Sheets!")
+                        st.success(f"{qtd_importados} produtos importados para o Supabase!")
                         st.rerun()
                 except Exception as e:
                     st.error(f"Não foi possível acessar a planilha. Verifique o ID e as permissões: {e}")
@@ -696,7 +685,7 @@ else:
         df_hist = buscar_historico()
         st.dataframe(df_hist, use_container_width=True)
 
-    # --- ABA 6: CADASTRAR PRODUTO (NOVA LÓGICA DE CAIXAS / METROS) ---
+    # --- ABA 6: CADASTRAR PRODUTO ---
     elif opcao == "➕ Cadastrar Produto":
         st.title("➕ Cadastrar Novo Produto")
         if st.session_state.perfil != "Admin":
@@ -711,109 +700,69 @@ else:
                 
                 with c_b:
                     if unidade == "Caixa":
-                        qtd_por_caixa = st.number_input("Quantos itens vêm em 1 Caixa fechada?", min_value=1, value=48, step=1)
-                        qtd_itens_input = st.number_input("Quantidade Total Inicial de Itens em Estoque:", min_value=0.0, step=1.0, value=0.0)
-                        
-                        # Cálculo explicativo em tempo real
-                        if qtd_por_caixa > 0:
-                            caixas_calc = qtd_itens_input / qtd_por_caixa
-                            st.info(f"💡 **Equivalência:** {qtd_itens_input:.0f} itens correspondem a **{caixas_calc:.2f} Caixas**.")
+                        qtd_por_caixa = st.number_input("Quantas unidades formam 1 Caixa?", min_value=1, value=48, step=1)
+                        # Caixas sempre iniciam em 0 conforme solicitado
+                        qtd_inicial_caixas = st.number_input("Quantidade Inicial de Caixas em Estoque:", value=0, disabled=True, help="O estoque inicia em 0 caixas por padrão.")
+                        qtd_itens_input = 0.0
                     else:
                         qtd_por_caixa = 1
-                        qtd_itens_input = st.number_input("Quantidade Inicial em Metros (Mts):", min_value=0.0, step=0.5, value=0.0)
+                        qtd_itens_input = st.number_input("Metros Iniciais em Estoque:", min_value=0.0, step=0.5, value=0.0)
 
                 foto = st.file_uploader("Foto do Produto (Opcional)", type=["jpg", "png", "jpeg"])
 
-                if st.form_submit_button("Salvar Produto"):
+                if st.form_submit_button("Cadastrar Produto"):
                     if nome:
                         foto_path = ""
                         if foto is not None:
                             foto_path = salvar_arquivo_seguro(foto, tipo="imagem")
-
-                        cadastrar_produto(nome, cat, float(qtd_itens_input), unidade, int(qtd_por_caixa), foto_path)
-                        st.success(f"Produto '{nome}' cadastrado com sucesso!")
+                        
+                        cadastrar_produto(
+                            nome, cat, qtd_itens_input, unidade, int(qtd_por_caixa), foto_path
+                        )
+                        st.success(f"Produto '{nome}' cadastrado com sucesso no Supabase!")
                         st.rerun()
                     else:
                         st.warning("Preencha o nome do produto!")
 
-    # --- ABA 7: GERENCIAR USUÁRIOS & SENHAS (EXCLUSIVO ADMIN) ---
+    # --- ABA 7: GERENCIAR USUÁRIOS (ADMIN) ---
     elif opcao == "👥 Gerenciar Usuários":
-        st.title("👥 Gerenciamento de Usuários e Senhas")
+        st.title("👥 Gerenciamento de Usuários")
         
-        if st.session_state.perfil != "Admin":
-            st.error("Acesso Negado: Apenas Administradores podem acessar esta área!")
-        else:
-            st.subheader("🔑 Usuários Cadastrados")
-            df_usr = buscar_usuarios()
-            st.dataframe(df_usr, use_container_width=True)
+        st.subheader("➕ Cadastrar Novo Usuário")
+        with st.form("form_novo_user"):
+            u_nome = st.text_input("Nome do Usuário")
+            u_senha = st.text_input("Senha", type="password")
+            u_perfil = st.selectbox("Perfil de Acesso", ["Operador", "Admin"])
+            if st.form_submit_button("Salvar Usuário"):
+                if u_nome and u_senha:
+                    ok, msg = cadastrar_usuario(u_nome, u_senha, u_perfil)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Preencha o nome de usuário e a senha!")
 
-            st.write("---")
+        st.write("---")
+        st.subheader("📋 Usuários Cadastrados no Supabase")
+        df_users = buscar_usuarios()
+        st.dataframe(df_users, use_container_width=True)
 
-            col_u1, col_u2 = st.columns(2)
-
-            with col_u1:
-                st.subheader("➕ Criar Novo Usuário")
-                with st.form("form_usr"):
-                    u = st.text_input("Novo Usuário")
-                    p = st.text_input("Senha", type="password")
-                    perfil = st.selectbox("Perfil de Acesso", ["Operador", "Admin"])
-                    if st.form_submit_button("Criar Usuário"):
-                        if u and p:
-                            ok, msg = cadastrar_usuario(u, p, perfil)
-                            if ok:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
-                        else:
-                            st.warning("Preencha usuário e senha!")
-
-            with col_u2:
-                st.subheader("⚙️ Alterar Senha ou Excluir Usuário")
-                if not df_usr.empty:
-                    usr_selecionado = st.selectbox("Selecione o Usuário:", df_usr['usuario'].tolist())
-                    row_usr = df_usr[df_usr['usuario'] == usr_selecionado].iloc[0]
-
-                    nova_senha = st.text_input("Nova Senha", type="password")
-                    
-                    c_btn1, c_btn2 = st.columns(2)
-                    with c_btn1:
-                        if st.button("💾 Salvar Nova Senha"):
-                            if nova_senha:
-                                alterar_senha_usuario(int(row_usr['id']), nova_senha)
-                                st.success(f"Senha do usuário '{row_usr['usuario']}' alterada com sucesso!")
-                                st.rerun()
-                            else:
-                                st.warning("Digite a nova senha.")
-
-                    with c_btn2:
-                        if row_usr['usuario'] == st.session_state.usuario:
-                            st.caption("⚠️ Não é possível excluir o usuário conectado.")
-                        else:
-                            if st.button("🗑️ Excluir Usuário", type="secondary"):
-                                excluir_usuario(int(row_usr['id']))
-                                st.warning(f"Usuário '{row_usr['usuario']}' excluído!")
-                                st.rerun()
-
-    # --- ABA 8: PERSONALIZAR EMPRESA (EXCLUSIVO ADMIN) ---
+    # --- ABA 8: PERSONALIZAR EMPRESA (ADMIN) ---
     elif opcao == "⚙️ Personalizar Empresa":
         st.title("⚙️ Personalização do Sistema")
         
-        if st.session_state.perfil != "Admin":
-            st.error("Acesso Negado: Apenas Administradores podem alterar a marca do sistema!")
-        else:
-            st.subheader("🎨 Personalizar Nome, Logomarca e Cores")
+        with st.form("form_config"):
+            emp_nome = st.text_input("Nome da Empresa", value=config['nome_empresa'])
+            emp_cor = st.color_picker("Cor Principal do Tema", value=config['cor_tema'])
+            emp_logo = st.file_uploader("Atualizar Logomarca da Empresa", type=["png", "jpg", "jpeg"])
             
-            with st.form("form_config"):
-                novo_nome = st.text_input("Nome da Empresa / Sistema", value=config['nome_empresa'])
-                nova_logo = st.file_uploader("Logomarca da Empresa", type=["png", "jpg", "jpeg"])
-                cor_tema = st.color_picker("Cor Principal dos Gráficos", value=config['cor_tema'])
-
-                if st.form_submit_button("💾 Salvar Personalização"):
-                    logo_path = config['logo_path']
-                    if nova_logo is not None:
-                        logo_path = salvar_arquivo_seguro(nova_logo, tipo="imagem")
-
-                    salvar_configuracoes(novo_nome, logo_path, cor_tema)
-                    st.success("Personalização salva com sucesso!")
-                    st.rerun()
+            if st.form_submit_button("Salvar Configurações"):
+                logo_path = config['logo_path']
+                if emp_logo is not None:
+                    logo_path = salvar_arquivo_seguro(emp_logo, tipo="imagem")
+                
+                salvar_configuracoes(emp_nome, logo_path, emp_cor)
+                st.success("Configurações atualizadas!")
+                st.rerun()
