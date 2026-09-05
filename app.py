@@ -63,7 +63,7 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
 
     return caminho_completo
 
-# --- CONEXÃO POOLED COM SUPABASE ---
+# --- CONEXÃO POOLED COM SUPABASE (COM CORREÇÃO DE TRANSAÇÃO) ---
 
 SUPABASE_DB_URL = st.secrets.get(
     "SUPABASE_DB_URL", 
@@ -72,7 +72,7 @@ SUPABASE_DB_URL = st.secrets.get(
 
 @st.cache_resource
 def obter_conexao():
-    """Mantém a conexão com o Supabase aberta em cache para evitar atrasos na reconexão."""
+    """Mantém a conexão com o Supabase aberta em cache."""
     return psycopg2.connect(SUPABASE_DB_URL)
 
 def conectar():
@@ -81,6 +81,9 @@ def conectar():
         if conn.closed != 0:
             st.cache_resource.clear()
             return obter_conexao()
+        # Se a conexão anterior falhou/travou, limpa o estado de erro antes de reusar
+        if conn.status == psycopg2.extensions.STATUS_IN_TRANSACTION:
+            conn.rollback()
         return conn
     except Exception:
         st.cache_resource.clear()
@@ -88,80 +91,90 @@ def conectar():
 
 def inicializar_banco():
     conn = conectar()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS configuracoes (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                nome_empresa TEXT DEFAULT 'Sistema de Almoxarifado',
-                logo_path TEXT DEFAULT '',
-                cor_tema TEXT DEFAULT '#2196F3',
-                mapa_path TEXT DEFAULT ''
-            );
-        """)
-        cursor.execute("INSERT INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado') ON CONFLICT (id) DO NOTHING;")
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS configuracoes (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    nome_empresa TEXT DEFAULT 'Sistema de Almoxarifado',
+                    logo_path TEXT DEFAULT '',
+                    cor_tema TEXT DEFAULT '#2196F3',
+                    mapa_path TEXT DEFAULT ''
+                );
+            """)
+            cursor.execute("INSERT INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado') ON CONFLICT (id) DO NOTHING;")
+            conn.commit()
 
-        # Garante coluna mapa_path se tabela ja existia
-        cursor.execute("ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS mapa_path TEXT DEFAULT '';")
+            cursor.execute("ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS mapa_path TEXT DEFAULT '';")
+            conn.commit()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS produtos (
-                id SERIAL PRIMARY KEY,
-                nome TEXT NOT NULL,
-                categoria TEXT DEFAULT 'Geral',
-                localizacao TEXT DEFAULT 'Não informada',
-                quantidade REAL NOT NULL DEFAULT 0,
-                unidade_medida TEXT DEFAULT 'Caixa',
-                qtd_por_caixa INTEGER DEFAULT 1,
-                foto_path TEXT DEFAULT ''
-            );
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS produtos (
+                    id SERIAL PRIMARY KEY,
+                    nome TEXT NOT NULL,
+                    categoria TEXT DEFAULT 'Geral',
+                    localizacao TEXT DEFAULT 'Não informada',
+                    quantidade REAL NOT NULL DEFAULT 0,
+                    unidade_medida TEXT DEFAULT 'Caixa',
+                    qtd_por_caixa INTEGER DEFAULT 1,
+                    foto_path TEXT DEFAULT ''
+                );
+            """)
+            conn.commit()
 
-        # Garante coluna localizacao se tabela ja existia
-        cursor.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS localizacao TEXT DEFAULT 'Não informada';")
+            cursor.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS localizacao TEXT DEFAULT 'Não informada';")
+            conn.commit()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS historico (
-                id SERIAL PRIMARY KEY,
-                produto_id INTEGER REFERENCES produtos(id) ON DELETE CASCADE,
-                tipo TEXT NOT NULL,
-                quantidade REAL NOT NULL,
-                usuario TEXT DEFAULT 'Sistema',
-                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS historico (
+                    id SERIAL PRIMARY KEY,
+                    produto_id INTEGER REFERENCES produtos(id) ON DELETE CASCADE,
+                    tipo TEXT NOT NULL,
+                    quantidade REAL NOT NULL,
+                    usuario TEXT DEFAULT 'Sistema',
+                    data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.commit()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id SERIAL PRIMARY KEY,
-                usuario TEXT UNIQUE NOT NULL,
-                senha TEXT NOT NULL,
-                perfil TEXT NOT NULL
-            );
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios (
+                    id SERIAL PRIMARY KEY,
+                    usuario TEXT UNIQUE NOT NULL,
+                    senha TEXT NOT NULL,
+                    perfil TEXT NOT NULL
+                );
+            """)
+            conn.commit()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS notas_fiscais (
-                id SERIAL PRIMARY KEY,
-                numero_nf TEXT NOT NULL,
-                fornecedor TEXT NOT NULL,
-                cnpj_fornecedor TEXT DEFAULT '',
-                produto_nome TEXT NOT NULL,
-                quantidade REAL NOT NULL,
-                valor_unitario REAL DEFAULT 0.0,
-                valor_total REAL DEFAULT 0.0,
-                data_recebimento TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                usuario TEXT DEFAULT 'Sistema'
-            );
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notas_fiscais (
+                    id SERIAL PRIMARY KEY,
+                    numero_nf TEXT NOT NULL,
+                    fornecedor TEXT NOT NULL,
+                    cnpj_fornecedor TEXT DEFAULT '',
+                    produto_nome TEXT NOT NULL,
+                    quantidade REAL NOT NULL,
+                    valor_unitario REAL DEFAULT 0.0,
+                    valor_total REAL DEFAULT 0.0,
+                    data_recebimento TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    usuario TEXT DEFAULT 'Sistema'
+                );
+            """)
+            conn.commit()
 
-        cursor.execute("SELECT COUNT(*) FROM usuarios")
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("admin", gerar_hash_senha("1234"), "Admin"))
-            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("operador", gerar_hash_senha("1234"), "Operador"))
+            cursor.execute("SELECT COUNT(*) FROM usuarios")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("admin", gerar_hash_senha("1234"), "Admin"))
+                cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("operador", gerar_hash_senha("1234"), "Operador"))
+                conn.commit()
 
-        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        st.cache_resource.clear()
+        raise e
 
-# Inicializa o banco uma única vez na inicialização
+# Inicializa o banco na abertura do app
 if 'banco_inicializado' not in st.session_state:
     inicializar_banco()
     st.session_state.banco_inicializado = True
@@ -432,7 +445,7 @@ else:
     st.sidebar.title(config['nome_empresa'])
     st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
 
-    # Visualização do Mapa / Layout do Almoxarifado no Menu
+    # Visualização do Mapa no Menu Lateral
     if config['mapa_path'] and os.path.exists(config['mapa_path']):
         st.sidebar.write("---")
         st.sidebar.subheader("🗺️ Layout / Mapa")
