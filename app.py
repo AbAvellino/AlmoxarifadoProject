@@ -6,148 +6,144 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
+# Configuração da página Streamlit
+st.set_page_config(page_title="Sistema de Almoxarifado", layout="wide", page_icon="📦")
+
 # Criar pasta para salvar imagens do sistema e produtos
 if not os.path.exists("uploads"):
     os.makedirs("uploads")
 
 # --- CONEXÃO E INICIALIZAÇÃO DO BANCO DE DADOS ---
 
+DB_NAME = "almoxarifado.db"
+
 def conectar():
-    return sqlite3.connect("almoxarifado.db")
+    return sqlite3.connect(DB_NAME)
 
 def inicializar_banco():
-    conn = conectar()
-    cursor = conn.cursor()
-    
-    # Configurações da Empresa
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS configuracoes (
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            nome_empresa TEXT DEFAULT 'Sistema de Almoxarifado',
-            logo_path TEXT DEFAULT '',
-            cor_tema TEXT DEFAULT '#2196F3'
-        )
-    """)
-    cursor.execute("INSERT OR IGNORE INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado')")
+    with conectar() as conn:
+        cursor = conn.cursor()
+        
+        # Configurações da Empresa
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS configuracoes (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                nome_empresa TEXT DEFAULT 'Sistema de Almoxarifado',
+                logo_path TEXT DEFAULT '',
+                cor_tema TEXT DEFAULT '#2196F3'
+            )
+        """)
+        cursor.execute("INSERT OR IGNORE INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado')")
 
-    # Produtos
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS produtos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            categoria TEXT DEFAULT 'Geral',
-            quantidade INTEGER NOT NULL DEFAULT 0,
-            foto_path TEXT DEFAULT ''
-        )
-    """)
-    try:
-        cursor.execute("ALTER TABLE produtos ADD COLUMN foto_path TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
+        # Produtos
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS produtos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL,
+                categoria TEXT DEFAULT 'Geral',
+                quantidade INTEGER NOT NULL DEFAULT 0,
+                foto_path TEXT DEFAULT ''
+            )
+        """)
+        try:
+            cursor.execute("ALTER TABLE produtos ADD COLUMN foto_path TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
-    # Histórico
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS historico (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            produto_id INTEGER NOT NULL,
-            tipo TEXT NOT NULL,
-            quantidade INTEGER NOT NULL,
-            usuario TEXT DEFAULT 'Sistema',
-            data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (produto_id) REFERENCES produtos (id)
-        )
-    """)
+        # Histórico
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS historico (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                produto_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL,
+                quantidade INTEGER NOT NULL,
+                usuario TEXT DEFAULT 'Sistema',
+                data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (produto_id) REFERENCES produtos (id)
+            )
+        """)
 
-    # Usuários
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario TEXT UNIQUE NOT NULL,
-            senha TEXT NOT NULL,
-            perfil TEXT NOT NULL
-        )
-    """)
+        # Usuários
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario TEXT UNIQUE NOT NULL,
+                senha TEXT NOT NULL,
+                perfil TEXT NOT NULL
+            )
+        """)
 
-    # Notas Fiscais
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS notas_fiscais (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            numero_nf TEXT NOT NULL,
-            fornecedor TEXT NOT NULL,
-            cnpj_fornecedor TEXT DEFAULT '',
-            produto_nome TEXT NOT NULL,
-            quantidade INTEGER NOT NULL,
-            valor_unitario REAL DEFAULT 0.0,
-            valor_total REAL DEFAULT 0.0,
-            data_recebimento DATETIME DEFAULT CURRENT_TIMESTAMP,
-            usuario TEXT DEFAULT 'Sistema'
-        )
-    """)
+        # Notas Fiscais
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notas_fiscais (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                numero_nf TEXT NOT NULL,
+                fornecedor TEXT NOT NULL,
+                cnpj_fornecedor TEXT DEFAULT '',
+                produto_nome TEXT NOT NULL,
+                quantidade INTEGER NOT NULL,
+                valor_unitario REAL DEFAULT 0.0,
+                valor_total REAL DEFAULT 0.0,
+                data_recebimento DATETIME DEFAULT CURRENT_TIMESTAMP,
+                usuario TEXT DEFAULT 'Sistema'
+            )
+        """)
 
-    # Usuários Padrão
-    cursor.execute("SELECT COUNT(*) FROM usuarios")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", ("admin", "1234", "Admin"))
-        cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", ("operador", "1234", "Operador"))
+        # Usuários Padrão
+        cursor.execute("SELECT COUNT(*) FROM usuarios")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", ("admin", "1234", "Admin"))
+            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", ("operador", "1234", "Operador"))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 inicializar_banco()
 
 # --- FUNÇÕES DE CONFIGURAÇÃO E EMPRESA ---
 
 def buscar_configuracoes():
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("SELECT nome_empresa, logo_path, cor_tema FROM configuracoes WHERE id = 1")
-    res = cursor.fetchone()
-    conn.close()
-    return {"nome_empresa": res[0], "logo_path": res[1], "cor_tema": res[2]} if res else {"nome_empresa": "Sistema de Almoxarifado", "logo_path": "", "cor_tema": "#2196F3"}
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT nome_empresa, logo_path, cor_tema FROM configuracoes WHERE id = 1")
+        res = cursor.fetchone()
+        return {"nome_empresa": res[0], "logo_path": res[1], "cor_tema": res[2]} if res else {"nome_empresa": "Sistema de Almoxarifado", "logo_path": "", "cor_tema": "#2196F3"}
 
 def salvar_configuracoes(nome, logo_path, cor):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE configuracoes SET nome_empresa = ?, logo_path = ?, cor_tema = ? WHERE id = 1", (nome, logo_path, cor))
-    conn.commit()
-    conn.close()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE configuracoes SET nome_empresa = ?, logo_path = ?, cor_tema = ? WHERE id = 1", (nome, logo_path, cor))
+        conn.commit()
 
 # --- FUNÇÕES DE NEGÓCIO E LÓGICA SQL ---
 
 def autenticar_usuario(usuario, senha):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("SELECT perfil FROM usuarios WHERE usuario = ? AND senha = ?", (usuario, senha))
-    res = cursor.fetchone()
-    conn.close()
-    return res[0] if res else None
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT perfil FROM usuarios WHERE usuario = ? AND senha = ?", (usuario, senha))
+        res = cursor.fetchone()
+        return res[0] if res else None
 
 def buscar_produtos():
-    conn = conectar()
-    df = pd.read_sql_query("SELECT id, nome, categoria, quantidade, foto_path FROM produtos", conn)
-    conn.close()
-    return df
+    with conectar() as conn:
+        return pd.read_sql_query("SELECT id, nome, categoria, quantidade, foto_path FROM produtos", conn)
 
 def cadastrar_produto(nome, categoria, quantidade, foto_path=""):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO produtos (nome, categoria, quantidade, foto_path) VALUES (?, ?, ?, ?)", (nome, categoria, quantidade, foto_path))
-    conn.commit()
-    conn.close()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO produtos (nome, categoria, quantidade, foto_path) VALUES (?, ?, ?, ?)", (nome, categoria, quantidade, foto_path))
+        conn.commit()
 
 def editar_produto(prod_id, nome, categoria, quantidade, foto_path=""):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE produtos SET nome = ?, categoria = ?, quantidade = ?, foto_path = ? WHERE id = ?", (nome, categoria, quantidade, foto_path, prod_id))
-    conn.commit()
-    conn.close()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE produtos SET nome = ?, categoria = ?, quantidade = ?, foto_path = ? WHERE id = ?", (nome, categoria, quantidade, foto_path, prod_id))
+        conn.commit()
 
 def excluir_produto(prod_id):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM produtos WHERE id = ?", (prod_id,))
-    conn.commit()
-    conn.close()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM produtos WHERE id = ?", (prod_id,))
+        conn.commit()
 
 def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado):
     if tipo == "SAÍDA" and qtd_mov > qtd_atual:
@@ -155,46 +151,42 @@ def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado):
 
     nova_qtd = qtd_atual + qtd_mov if tipo == "ENTRADA" else qtd_atual - qtd_mov
 
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE produtos SET quantidade = ? WHERE id = ?", (nova_qtd, prod_id))
-    cursor.execute(
-        "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (?, ?, ?, ?)",
-        (prod_id, tipo, qtd_mov, usuario_logado)
-    )
-    conn.commit()
-    conn.close()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE produtos SET quantidade = ? WHERE id = ?", (nova_qtd, prod_id))
+        cursor.execute(
+            "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (?, ?, ?, ?)",
+            (prod_id, tipo, qtd_mov, usuario_logado)
+        )
+        conn.commit()
     return True, "Movimentação realizada com sucesso!"
 
 def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, usuario_logado, categoria="Geral"):
     valor_total = qtd_mov * valor_unit
 
-    conn = conectar()
-    cursor = conn.cursor()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, quantidade FROM produtos WHERE LOWER(nome) = LOWER(?)", (nome_prod.strip(),))
+        res_prod = cursor.fetchone()
 
-    cursor.execute("SELECT id, quantidade FROM produtos WHERE LOWER(nome) = LOWER(?)", (nome_prod.strip(),))
-    res_prod = cursor.fetchone()
+        if res_prod:
+            prod_id, qtd_atual = res_prod
+            nova_qtd = qtd_atual + qtd_mov
+            cursor.execute("UPDATE produtos SET quantidade = ? WHERE id = ?", (nova_qtd, prod_id))
+        else:
+            cursor.execute("INSERT INTO produtos (nome, categoria, quantidade) VALUES (?, ?, ?)", (nome_prod.strip(), categoria, qtd_mov))
+            prod_id = cursor.lastrowid
 
-    if res_prod:
-        prod_id, qtd_atual = res_prod
-        nova_qtd = qtd_atual + qtd_mov
-        cursor.execute("UPDATE produtos SET quantidade = ? WHERE id = ?", (nova_qtd, prod_id))
-    else:
-        cursor.execute("INSERT INTO produtos (nome, categoria, quantidade) VALUES (?, ?, ?)", (nome_prod.strip(), categoria, qtd_mov))
-        prod_id = cursor.lastrowid
+        cursor.execute("""
+            INSERT INTO notas_fiscais (numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, valor_unitario, valor_total, usuario)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, valor_total, usuario_logado))
 
-    cursor.execute("""
-        INSERT INTO notas_fiscais (numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, valor_unitario, valor_total, usuario)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, valor_total, usuario_logado))
-
-    cursor.execute(
-        "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (?, ?, ?, ?)",
-        (prod_id, f"ENTRADA (NF {numero_nf})", qtd_mov, usuario_logado)
-    )
-
-    conn.commit()
-    conn.close()
+        cursor.execute(
+            "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (?, ?, ?, ?)",
+            (prod_id, f"ENTRADA (NF {numero_nf})", qtd_mov, usuario_logado)
+        )
+        conn.commit()
     return True
 
 def processar_xml_nfe(xml_file):
@@ -219,8 +211,12 @@ def processar_xml_nfe(xml_file):
         for det in det_list:
             prod = det.find('nfe:prod', ns) if ns else det.find('prod')
             nome_item = get_tag(prod, 'nfe:xProd') if ns else get_tag(prod, 'xProd')
-            qtd_item = float(get_tag(prod, 'nfe:qCom') if ns else get_tag(prod, 'qCom'))
-            val_unit = float(get_tag(prod, 'nfe:vUnCom') if ns else get_tag(prod, 'vUnCom'))
+            
+            raw_qtd = get_tag(prod, 'nfe:qCom') if ns else get_tag(prod, 'qCom')
+            raw_unit = get_tag(prod, 'nfe:vUnCom') if ns else get_tag(prod, 'vUnCom')
+
+            qtd_item = float(raw_qtd) if raw_qtd else 0.0
+            val_unit = float(raw_unit) if raw_unit else 0.0
 
             itens.append({
                 "produto": nome_item,
@@ -234,60 +230,61 @@ def processar_xml_nfe(xml_file):
         return False, f"Erro ao ler arquivo XML: {str(e)}"
 
 def buscar_notas_fiscais():
-    conn = conectar()
-    df = pd.read_sql_query("""
-        SELECT id, numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, 
-               valor_unitario, valor_total, data_recebimento, usuario
-        FROM notas_fiscais
-        ORDER BY id DESC
-    """, conn)
-    conn.close()
-    return df
+    with conectar() as conn:
+        return pd.read_sql_query("""
+            SELECT id, numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, 
+                   valor_unitario, valor_total, data_recebimento, usuario
+            FROM notas_fiscais
+            ORDER BY id DESC
+        """, conn)
 
 def buscar_usuarios():
-    conn = conectar()
-    df = pd.read_sql_query("SELECT id, usuario, senha, perfil FROM usuarios", conn)
-    conn.close()
-    return df
+    with conectar() as conn:
+        return pd.read_sql_query("SELECT id, usuario, senha, perfil FROM usuarios", conn)
 
 def cadastrar_usuario(usuario, senha, perfil):
     try:
-        conn = conectar()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", (usuario, senha, perfil))
-        conn.commit()
-        conn.close()
-        return True, f"Usuário '{usuario}' cadastrado!"
+        with conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", (usuario, senha, perfil))
+            conn.commit()
+            return True, f"Usuário '{usuario}' cadastrado!"
     except sqlite3.IntegrityError:
         return False, "Usuário já existe!"
 
 def alterar_senha_usuario(usr_id, nova_senha):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE usuarios SET senha = ? WHERE id = ?", (nova_senha, usr_id))
-    conn.commit()
-    conn.close()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE usuarios SET senha = ? WHERE id = ?", (nova_senha, usr_id))
+        conn.commit()
 
 def excluir_usuario(usr_id):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM usuarios WHERE id = ?", (usr_id,))
-    conn.commit()
-    conn.close()
+    with conectar() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM usuarios WHERE id = ?", (usr_id,))
+        conn.commit()
 
 def buscar_historico():
-    conn = conectar()
-    df = pd.read_sql_query("""
-        SELECT h.id, p.nome as produto, h.tipo, h.quantidade, h.usuario, h.data_hora 
-        FROM historico h
-        LEFT JOIN produtos p ON h.produto_id = p.id
-        ORDER BY h.id DESC
-    """, conn)
-    conn.close()
-    return df
+    with conectar() as conn:
+        return pd.read_sql_query("""
+            SELECT h.id, p.nome as produto, h.tipo, h.quantidade, h.usuario, h.data_hora 
+            FROM historico h
+            LEFT JOIN produtos p ON h.produto_id = p.id
+            ORDER BY h.id DESC
+        """, conn)
 
 # --- CARREGA DADOS DE CONFIGURAÇÃO VISUAL ---
 config = buscar_configuracoes()
+
+# CSS customizado para aplicar a cor do tema
+st.markdown(f"""
+    <style>
+    .stButton>button[kind="primary"] {{
+        background-color: {config['cor_tema']};
+        border-color: {config['cor_tema']};
+    }}
+    </style>
+""", unsafe_allow_html=True)
 
 # --- TELA DE LOGIN & NAVEGAÇÃO ---
 
@@ -344,7 +341,6 @@ else:
 
         df_prod = buscar_produtos()
 
-        # Tratamento para evitar o KeyError quando o banco está vazio
         if not df_prod.empty:
             df_prod['Status'] = df_prod['quantidade'].apply(lambda x: "⚠️ REPOR" if x < 5 else "OK")
         else:
@@ -362,7 +358,7 @@ else:
         st.subheader("🖼️ Galeria Visual de Produtos")
         if not df_prod.empty:
             cols = st.columns(4)
-            for idx, row in df_prod.iterrows():
+            for idx, row in df_prod.reset_index(drop=True).iterrows():
                 col = cols[idx % 4]
                 with col:
                     if row['foto_path'] and os.path.exists(row['foto_path']):
@@ -470,8 +466,7 @@ else:
 
         with aba_manual:
             st.subheader("➕ Lançamento Manual de Nota Fiscal")
-            df_prod = buscar_produtos()
-
+            
             with st.form("form_nf_manual"):
                 c1, c2 = st.columns(2)
                 with c1:
@@ -577,8 +572,9 @@ else:
                 st.subheader("Quantidade por Produto")
                 fig1, ax1 = plt.subplots()
                 ax1.bar(df_prod['nome'], df_prod['quantidade'], color=config['cor_tema'])
-                plt.xticks(rotation=45)
+                plt.xticks(rotation=45, ha='right')
                 ax1.set_ylabel("Quantidade")
+                plt.tight_layout()
                 st.pyplot(fig1)
 
             with col_g2:
@@ -586,6 +582,7 @@ else:
                 cat_df = df_prod.groupby('categoria')['quantidade'].sum()
                 fig2, ax2 = plt.subplots()
                 ax2.pie(cat_df, labels=cat_df.index, autopct='%1.1f%%', startangle=90)
+                plt.tight_layout()
                 st.pyplot(fig2)
         else:
             st.info("Cadastre produtos para visualizar os gráficos.")
@@ -641,7 +638,7 @@ else:
                 st.subheader("➕ Criar Novo Usuário")
                 with st.form("form_usr"):
                     u = st.text_input("Novo Usuário")
-                    p = st.text_input("Senha")
+                    p = st.text_input("Senha", type="password")
                     perfil = st.selectbox("Perfil de Acesso", ["Operador", "Admin"])
                     if st.form_submit_button("Criar Usuário"):
                         if u and p:
@@ -656,26 +653,27 @@ else:
 
             with col_u2:
                 st.subheader("⚙️ Alterar Senha ou Excluir Usuário")
-                usr_selecionado = st.selectbox("Selecione o Usuário:", df_usr['usuario'].tolist())
-                row_usr = df_usr[df_usr['usuario'] == usr_selecionado].iloc[0]
+                if not df_usr.empty:
+                    usr_selecionado = st.selectbox("Selecione o Usuário:", df_usr['usuario'].tolist())
+                    row_usr = df_usr[df_usr['usuario'] == usr_selecionado].iloc[0]
 
-                nova_senha = st.text_input("Nova Senha", value=str(row_usr['senha']))
-                
-                c_btn1, c_btn2 = st.columns(2)
-                with c_btn1:
-                    if st.button("💾 Salvar Nova Senha"):
-                        alterar_senha_usuario(int(row_usr['id']), nova_senha)
-                        st.success(f"Senha do usuário '{row_usr['usuario']}' alterada!")
-                        st.rerun()
-
-                with c_btn2:
-                    if row_usr['usuario'] == st.session_state.usuario:
-                        st.caption("⚠️ Não é possível excluir o usuário conectado.")
-                    else:
-                        if st.button("🗑️ Excluir Usuário", type="secondary"):
-                            excluir_usuario(int(row_usr['id']))
-                            st.warning(f"Usuário '{row_usr['usuario']}' excluído!")
+                    nova_senha = st.text_input("Nova Senha", value=str(row_usr['senha']), type="password")
+                    
+                    c_btn1, c_btn2 = st.columns(2)
+                    with c_btn1:
+                        if st.button("💾 Salvar Nova Senha"):
+                            alterar_senha_usuario(int(row_usr['id']), nova_senha)
+                            st.success(f"Senha do usuário '{row_usr['usuario']}' alterada!")
                             st.rerun()
+
+                    with c_btn2:
+                        if row_usr['usuario'] == st.session_state.usuario:
+                            st.caption("⚠️ Não é possível excluir o usuário conectado.")
+                        else:
+                            if st.button("🗑️ Excluir Usuário", type="secondary"):
+                                excluir_usuario(int(row_usr['id']))
+                                st.warning(f"Usuário '{row_usr['usuario']}' excluído!")
+                                st.rerun()
 
     # --- ABA 8: PERSONALIZAR EMPRESA (EXCLUSIVO ADMIN) ---
     elif opcao == "⚙️ Personalizar Empresa":
