@@ -34,6 +34,7 @@ def verificar_senha(senha_digitada: str, hash_armazenado: str) -> bool:
 
 EXTENSOES_PERMITIDAS_IMAGEM = {".jpg", ".jpeg", ".png", ".webp"}
 EXTENSOES_PERMITIDAS_XML = {".xml"}
+EXTENSOES_PERMITIDAS_MAPA = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".xlsx", ".xls"}
 
 def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem") -> str:
     if uploaded_file is None:
@@ -42,7 +43,15 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
     _, ext = os.path.splitext(uploaded_file.name)
     ext = ext.lower()
 
-    permitidas = EXTENSOES_PERMITIDAS_IMAGEM if tipo == "imagem" else EXTENSOES_PERMITIDAS_XML
+    if tipo == "imagem":
+        permitidas = EXTENSOES_PERMITIDAS_IMAGEM
+    elif tipo == "xml":
+        permitidas = EXTENSOES_PERMITIDAS_XML
+    elif tipo == "mapa":
+        permitidas = EXTENSOES_PERMITIDAS_MAPA
+    else:
+        permitidas = EXTENSOES_PERMITIDAS_IMAGEM
+
     if ext not in permitidas:
         raise ValueError(f"Extensão não permitida: {ext}")
 
@@ -54,7 +63,7 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
 
     return caminho_completo
 
-# --- CONEXÃO POOLED COM SUPABASE (DESEMPENHO OTIMIZADO) ---
+# --- CONEXÃO POOLED COM SUPABASE ---
 
 SUPABASE_DB_URL = st.secrets.get(
     "SUPABASE_DB_URL", 
@@ -85,22 +94,30 @@ def inicializar_banco():
                 id INTEGER PRIMARY KEY DEFAULT 1,
                 nome_empresa TEXT DEFAULT 'Sistema de Almoxarifado',
                 logo_path TEXT DEFAULT '',
-                cor_tema TEXT DEFAULT '#2196F3'
+                cor_tema TEXT DEFAULT '#2196F3',
+                mapa_path TEXT DEFAULT ''
             );
         """)
         cursor.execute("INSERT INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado') ON CONFLICT (id) DO NOTHING;")
+
+        # Garante coluna mapa_path se tabela ja existia
+        cursor.execute("ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS mapa_path TEXT DEFAULT '';")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS produtos (
                 id SERIAL PRIMARY KEY,
                 nome TEXT NOT NULL,
                 categoria TEXT DEFAULT 'Geral',
+                localizacao TEXT DEFAULT 'Não informada',
                 quantidade REAL NOT NULL DEFAULT 0,
                 unidade_medida TEXT DEFAULT 'Caixa',
                 qtd_por_caixa INTEGER DEFAULT 1,
                 foto_path TEXT DEFAULT ''
             );
         """)
+
+        # Garante coluna localizacao se tabela ja existia
+        cursor.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS localizacao TEXT DEFAULT 'Não informada';")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS historico (
@@ -149,20 +166,25 @@ if 'banco_inicializado' not in st.session_state:
     inicializar_banco()
     st.session_state.banco_inicializado = True
 
-# --- CACHING DE CONSULTAS (FIM DA LENTIDÃO) ---
+# --- CACHING DE CONSULTAS ---
 
 @st.cache_data(ttl=300)
 def buscar_configuracoes():
     conn = conectar()
     with conn.cursor() as cursor:
-        cursor.execute("SELECT nome_empresa, logo_path, cor_tema FROM configuracoes WHERE id = 1")
+        cursor.execute("SELECT nome_empresa, logo_path, cor_tema, mapa_path FROM configuracoes WHERE id = 1")
         res = cursor.fetchone()
-        return {"nome_empresa": res[0], "logo_path": res[1], "cor_tema": res[2]} if res else {"nome_empresa": "Sistema de Almoxarifado", "logo_path": "", "cor_tema": "#2196F3"}
+        return {
+            "nome_empresa": res[0] if res else "Sistema de Almoxarifado",
+            "logo_path": res[1] if res else "",
+            "cor_tema": res[2] if res else "#2196F3",
+            "mapa_path": res[3] if res else ""
+        }
 
-def salvar_configuracoes(nome, logo_path, cor):
+def salvar_configuracoes(nome, logo_path, cor, mapa_path=""):
     conn = conectar()
     with conn.cursor() as cursor:
-        cursor.execute("UPDATE configuracoes SET nome_empresa = %s, logo_path = %s, cor_tema = %s WHERE id = 1", (nome, logo_path, cor))
+        cursor.execute("UPDATE configuracoes SET nome_empresa = %s, logo_path = %s, cor_tema = %s, mapa_path = %s WHERE id = 1", (nome, logo_path, cor, mapa_path))
         conn.commit()
     st.cache_data.clear()
 
@@ -187,24 +209,24 @@ def autenticar_usuario(usuario, senha_digitada):
 @st.cache_data(ttl=60)
 def buscar_produtos():
     conn = conectar()
-    return pd.read_sql_query("SELECT id, nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path FROM produtos ORDER BY id ASC", conn)
+    return pd.read_sql_query("SELECT id, nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path FROM produtos ORDER BY id ASC", conn)
 
-def cadastrar_produto(nome, categoria, quantidade, unidade_medida="Caixa", qtd_por_caixa=1, foto_path=""):
+def cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida="Caixa", qtd_por_caixa=1, foto_path=""):
     conn = conectar()
     with conn.cursor() as cursor:
         cursor.execute(
-            "INSERT INTO produtos (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path) VALUES (%s, %s, %s, %s, %s, %s)", 
-            (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path)
+            "INSERT INTO produtos (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
+            (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path)
         )
         conn.commit()
     st.cache_data.clear()
 
-def editar_produto(prod_id, nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path=""):
+def editar_produto(prod_id, nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path=""):
     conn = conectar()
     with conn.cursor() as cursor:
         cursor.execute(
-            "UPDATE produtos SET nome = %s, categoria = %s, quantidade = %s, unidade_medida = %s, qtd_por_caixa = %s, foto_path = %s WHERE id = %s", 
-            (nome, categoria, quantidade, unidade_medida, qtd_por_caixa, foto_path, prod_id)
+            "UPDATE produtos SET nome = %s, categoria = %s, localizacao = %s, quantidade = %s, unidade_medida = %s, qtd_por_caixa = %s, foto_path = %s WHERE id = %s", 
+            (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, prod_id)
         )
         conn.commit()
     st.cache_data.clear()
@@ -233,7 +255,7 @@ def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado):
     st.cache_data.clear()
     return True, "Movimentação realizada com sucesso!"
 
-def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, usuario_logado, categoria="Geral"):
+def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, usuario_logado, categoria="Geral", localizacao="Almoxarifado Principal"):
     valor_total = qtd_mov * valor_unit
 
     conn = conectar()
@@ -246,7 +268,7 @@ def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, val
             nova_qtd = qtd_atual + qtd_mov
             cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
         else:
-            cursor.execute("INSERT INTO produtos (nome, categoria, quantidade) VALUES (%s, %s, %s) RETURNING id", (nome_prod.strip(), categoria, qtd_mov))
+            cursor.execute("INSERT INTO produtos (nome, categoria, localizacao, quantidade) VALUES (%s, %s, %s, %s) RETURNING id", (nome_prod.strip(), categoria, localizacao, qtd_mov))
             prod_id = cursor.fetchone()[0]
 
         cursor.execute("""
@@ -312,7 +334,7 @@ def buscar_notas_fiscais():
         ORDER BY id DESC
     """, conn)
 
-# --- GESTÃO COMPLETA DE USUÁRIOS (ADMIN) ---
+# --- GESTÃO DE USUÁRIOS ---
 
 @st.cache_data(ttl=60)
 def buscar_usuarios():
@@ -380,7 +402,7 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# SESSÃO DE AUTENTICAÇÃO PERSISTENTE (SEM CONSULTAS DESNECESSÁRIAS)
+# SESSÃO DE AUTENTICAÇÃO
 if 'logado' not in st.session_state:
     st.session_state.logado = False
     st.session_state.usuario = ""
@@ -409,6 +431,22 @@ else:
         st.sidebar.image(config['logo_path'], use_container_width=True)
     st.sidebar.title(config['nome_empresa'])
     st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
+
+    # Visualização do Mapa / Layout do Almoxarifado no Menu
+    if config['mapa_path'] and os.path.exists(config['mapa_path']):
+        st.sidebar.write("---")
+        st.sidebar.subheader("🗺️ Layout / Mapa")
+        ext = os.path.splitext(config['mapa_path'])[1].lower()
+        
+        with open(config['mapa_path'], "rb") as f:
+            bytes_file = f.read()
+        
+        st.sidebar.download_button(
+            label="📄 Baixar Mapa do Almoxarifado",
+            data=bytes_file,
+            file_name=f"mapa_almoxarifado{ext}",
+            mime="application/pdf" if ext == ".pdf" else "application/octet-stream"
+        )
     
     opcoes_menu = [
         "📦 Estoque & Movimentação",
@@ -451,16 +489,24 @@ else:
             df_prod['Status'] = pd.Series(dtype='str')
             df_prod['Saldo Formatado'] = pd.Series(dtype='str')
 
-        busca = st.text_input("🔍 Buscar produto pelo nome:")
-        if busca and not df_prod.empty:
-            df_prod = df_prod[df_prod['nome'].str.contains(busca, case=False, na=False)]
+        c_busca1, c_busca2 = st.columns([2, 1])
+        with c_busca1:
+            busca = st.text_input("🔍 Buscar por nome do produto:")
+        with c_busca2:
+            busca_loc = st.text_input("📍 Filtrar por Localização / Setor:")
 
-        st.dataframe(df_prod[['id', 'nome', 'categoria', 'unidade_medida', 'qtd_por_caixa', 'Saldo Formatado', 'Status']], use_container_width=True)
+        if not df_prod.empty:
+            if busca:
+                df_prod = df_prod[df_prod['nome'].str.contains(busca, case=False, na=False)]
+            if busca_loc:
+                df_prod = df_prod[df_prod['localizacao'].str.contains(busca_loc, case=False, na=False)]
+
+        st.dataframe(df_prod[['id', 'nome', 'categoria', 'localizacao', 'unidade_medida', 'qtd_por_caixa', 'Saldo Formatado', 'Status']], use_container_width=True)
 
         if df_prod.empty:
-            st.info("Nenhum produto cadastrado no momento. Acesse '➕ Cadastrar Produto' para começar!")
+            st.info("Nenhum produto cadastrado ou localizado no filtro. Acesse '➕ Cadastrar Produto' para começar!")
 
-        st.subheader("🖼️ Galeria Visual de Produtos")
+        st.subheader("🖼️ Galeria Visual de Produtos & Localização")
         if not df_prod.empty:
             cols = st.columns(4)
             for idx, row in df_prod.reset_index(drop=True).iterrows():
@@ -471,6 +517,7 @@ else:
                     else:
                         st.caption("📷 *Sem Foto*")
                     st.markdown(f"**{row['nome']}**")
+                    st.caption(f"📍 Loc: **{row['localizacao']}**")
                     st.caption(f"Estoque: {row['Saldo Formatado']} | Cat: {row['categoria']}")
 
         st.write("---")
@@ -510,7 +557,7 @@ else:
 
         if st.session_state.perfil == "Admin" and not df_prod.empty:
             st.write("---")
-            st.subheader("⚙️ Gerenciar Produtos e Fotos (Exclusivo Admin)")
+            st.subheader("⚙️ Gerenciar Produtos, Localização e Fotos (Exclusivo Admin)")
             
             p_sel = st.selectbox("Selecione um Produto para Editar ou Excluir:", df_prod['nome'].tolist(), key="admin_edit_prod")
             row_p = df_prod[df_prod['nome'] == p_sel].iloc[0]
@@ -519,6 +566,7 @@ else:
                 with st.form("form_edit_prod"):
                     e_nome = st.text_input("Nome do Produto", value=row_p['nome'])
                     e_cat = st.text_input("Categoria", value=row_p['categoria'])
+                    e_loc = st.text_input("Localização / Endereçamento", value=row_p.get('localizacao', 'Não informada'))
                     e_unidade = st.selectbox("Unidade de Medida", ["Caixa", "Metro"], index=0 if row_p['unidade_medida'] == 'Caixa' else 1)
                     
                     e_qtd_caixa = 1
@@ -535,7 +583,7 @@ else:
                     if e_foto is not None:
                         foto_path = salvar_arquivo_seguro(e_foto, tipo="imagem")
 
-                    editar_produto(int(row_p['id']), e_nome, e_cat, float(e_qtd), e_unidade, int(e_qtd_caixa), foto_path)
+                    editar_produto(int(row_p['id']), e_nome, e_cat, e_loc, float(e_qtd), e_unidade, int(e_qtd_caixa), foto_path)
                     st.success("Produto atualizado com sucesso!")
                     st.rerun()
 
@@ -623,7 +671,7 @@ else:
 
         with tab_excel:
             st.subheader("Upload de Arquivo Excel")
-            st.caption("Colunas suportadas: **nome**, **categoria**, **quantidade**, **unidade_medida**, **qtd_por_caixa**")
+            st.caption("Colunas suportadas: **nome**, **categoria**, **localizacao**, **quantidade**, **unidade_medida**, **qtd_por_caixa**")
 
             file_excel = st.file_uploader("Selecione o arquivo .xlsx:", type=["xlsx", "xls"])
             if file_excel is not None:
@@ -637,7 +685,8 @@ else:
                         for idx, row in df_imp.iterrows():
                             cadastrar_produto(
                                 str(row['nome']), 
-                                str(row.get('categoria', 'Geral')), 
+                                str(row.get('categoria', 'Geral')),
+                                str(row.get('localizacao', 'Não informada')),
                                 float(row.get('quantidade', 0)),
                                 str(row.get('unidade_medida', 'Caixa')),
                                 int(row.get('qtd_por_caixa', 1))
@@ -665,7 +714,8 @@ else:
                         for idx, row in df_gsheets.iterrows():
                             cadastrar_produto(
                                 str(row['nome']), 
-                                str(row.get('categoria', 'Geral')), 
+                                str(row.get('categoria', 'Geral')),
+                                str(row.get('localizacao', 'Não informada')),
                                 float(row.get('quantidade', 0)),
                                 str(row.get('unidade_medida', 'Caixa')),
                                 int(row.get('qtd_por_caixa', 1))
@@ -728,6 +778,7 @@ else:
                 with c_a:
                     nome = st.text_input("Nome do Produto")
                     cat = st.text_input("Categoria", value="Geral")
+                    loc = st.text_input("Localização / Endereçamento no Almoxarifado", placeholder="Ex: Rua A, Prateleira 3, Gaiola 02")
                     unidade = st.selectbox("Unidade de Medida", ["Caixa", "Metro"])
                 
                 with c_b:
@@ -748,7 +799,7 @@ else:
                             foto_path = salvar_arquivo_seguro(foto, tipo="imagem")
                         
                         cadastrar_produto(
-                            nome, cat, qtd_itens_input, unidade, int(qtd_por_caixa), foto_path
+                            nome, cat, loc if loc else "Não informada", qtd_itens_input, unidade, int(qtd_por_caixa), foto_path
                         )
                         st.success(f"Produto '{nome}' cadastrado com sucesso no Supabase!")
                         st.rerun()
@@ -814,18 +865,36 @@ else:
 
     # --- ABA 8: PERSONALIZAR EMPRESA (ADMIN) ---
     elif opcao == "⚙️ Personalizar Empresa":
-        st.title("⚙️ Personalização do Sistema")
+        st.title("⚙️ Personalização do Sistema e Layout")
         
         with st.form("form_config"):
             emp_nome = st.text_input("Nome da Empresa", value=config['nome_empresa'])
             emp_cor = st.color_picker("Cor Principal do Tema", value=config['cor_tema'])
             emp_logo = st.file_uploader("Atualizar Logomarca da Empresa", type=["png", "jpg", "jpeg"])
+            emp_mapa = st.file_uploader("Anexar Mapa / Layout de Setores do Almoxarifado (PDF, Excel ou Imagem)", type=["pdf", "png", "jpg", "jpeg", "xlsx", "xls"])
             
             if st.form_submit_button("Salvar Configurações"):
                 logo_path = config['logo_path']
+                mapa_path = config['mapa_path']
+
                 if emp_logo is not None:
                     logo_path = salvar_arquivo_seguro(emp_logo, tipo="imagem")
                 
-                salvar_configuracoes(emp_nome, logo_path, emp_cor)
-                st.success("Configurações atualizadas!")
+                if emp_mapa is not None:
+                    mapa_path = salvar_arquivo_seguro(emp_mapa, tipo="mapa")
+
+                salvar_configuracoes(emp_nome, logo_path, emp_cor, mapa_path)
+                st.success("Configurações do sistema e mapa atualizados com sucesso!")
                 st.rerun()
+
+        # Pré-visualização do Mapa Atual
+        if config['mapa_path'] and os.path.exists(config['mapa_path']):
+            st.write("---")
+            st.subheader("📌 Mapa / Layout Atual Anotado")
+            ext = os.path.splitext(config['mapa_path'])[1].lower()
+            if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+                st.image(config['mapa_path'], caption="Mapa do Almoxarifado", use_container_width=True)
+            elif ext == ".pdf":
+                st.info("O mapa do almoxarifado está salvo em formato **PDF**. Os usuários podem baixá-lo no menu lateral.")
+            else:
+                st.info(f"O mapa do almoxarifado está salvo em formato **{ext.upper()}**. Disponível para download no menu lateral.")
