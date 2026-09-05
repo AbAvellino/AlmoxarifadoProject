@@ -1,6 +1,5 @@
 streamlit
 pandas
 matplotlib
-openpyxl
-pillow
-supabase
+Pillow
+psycopg2-binary
