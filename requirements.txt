@@ -1,5 +1,5 @@
-streamlit
+fpdf2
 pandas
+streamlit
 psycopg2-binary
 xlsxwriter
-openpyxl
