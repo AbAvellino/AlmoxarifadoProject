@@ -75,7 +75,6 @@ def gerenciar_limpeza_pdf_pasta(pasta="relatorios_checklist"):
     arquivos.sort(key=os.path.getctime) # Ordena por data de criação (mais antigo primeiro)
     
     if len(arquivos) >= 4:
-        # Apaga os 2 mais antigos
         for i in range(2):
             try:
                 os.remove(arquivos[i])
@@ -83,7 +82,7 @@ def gerenciar_limpeza_pdf_pasta(pasta="relatorios_checklist"):
                 pass
 
 def gerar_pdf_checklist(titulo_doc, operador, dados_items, observacoes=""):
-    gerenciar_limpeza_pdf_pasta() # Executa a limpeza preventiva/rotativa
+    gerenciar_limpeza_pdf_pasta()
     
     pdf = FPDF()
     pdf.add_page()
@@ -210,7 +209,6 @@ def inicializar_banco():
             );
             """)
             
-            # Tabela de Checklists
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS checklist_ferramentas (
                 id SERIAL PRIMARY KEY,
@@ -566,14 +564,21 @@ if opcao == "📋 Consulta de Estoque":
 # --- ABA 2: CHECKLIST DE FERRAMENTAS ---
 elif opcao == "🛠️ Checklist de Ferramentas":
     st.title("🛠️ Checklist de Ferramentas e Equipamentos")
-    st.caption("Realize a conferência das ferramentas. Ao salvar, um PDF será gerado automaticamente. O sistema mantém os 3 PDFs mais recentes.")
+    st.caption("Realize a conferência das ferramentas. Os EPIs e insumos de consumo não aparecem nesta tela.")
 
     df_prod = buscar_produtos()
-    # Filtra produtos categorizados como Ferramentas ou Equipamentos
-    df_ferramentas = df_prod[df_prod['categoria'].str.contains("Ferramenta|Equipamento|EPI", case=False, na=False)] if not df_prod.empty else pd.DataFrame()
+    
+    # FILTRO ATUALIZADO: Seleciona Ferramenta ou Equipamento, mas EXCLUI categoricamente qualquer EPI
+    if not df_prod.empty:
+        filtro_incluir = df_prod['categoria'].str.contains("Ferramenta|Equipamento", case=False, na=False)
+        filtro_excluir_epi = ~df_prod['categoria'].str.contains("EPI", case=False, na=False) & ~df_prod['nome'].str.contains("EPI", case=False, na=False)
+        
+        df_ferramentas = df_prod[filtro_incluir & filtro_excluir_epi]
+    else:
+        df_ferramentas = pd.DataFrame()
 
     if df_ferramentas.empty:
-        st.warning("Nenhuma ferramenta cadastrada. Cadastre produtos com categoria 'Ferramentas' para utilizar esta aba.")
+        st.warning("Nenhuma ferramenta/equipamento cadastrado. Cadastre produtos com categoria 'Ferramenta' ou 'Equipamento' para realizar a inspeção.")
     else:
         st.subheader("📋 Lista de Verificação")
         
@@ -595,7 +600,6 @@ elif opcao == "🛠️ Checklist de Ferramentas":
 
         if btn_gerar_chk:
             try:
-                # Gera o PDF (que automaticamente remove relatórios antigos se for o 4º)
                 path_pdf = gerar_pdf_checklist("Checklist Diário", st.session_state.usuario, itens_checklist, obs_gerais)
                 salvar_registro_checklist(st.session_state.usuario, path_pdf, obs_gerais)
                 st.success("✅ Checklist concluído com sucesso! Relatório PDF gerado.")
@@ -693,7 +697,7 @@ elif opcao == "➕ Cadastrar Produto":
         with c1:
             nome = st.text_input("Nome do Produto *")
             codigo_barras = st.text_input("🏷️ Código de Barras (Bipar ou Digitar)")
-            categoria = st.text_input("Categoria (Ex: Ferramentas, EPI, Elétrica)", value="Geral")
+            categoria = st.text_input("Categoria (Ex: Ferramenta, Equipamento, EPI, Elétrica)", value="Geral")
             localizacao = st.text_input("Localização / Corredor / Prateleira", value="Almoxarifado Principal")
         with c2:
             unidade_medida = st.selectbox("Unidade de Medida", ["Caixa", "Metro", "Pacote", "Unidade"])
