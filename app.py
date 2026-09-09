@@ -166,9 +166,12 @@ def inicializar_banco():
                 unidade_medida TEXT DEFAULT 'Caixa',
                 qtd_por_caixa INTEGER DEFAULT 1,
                 foto_path TEXT DEFAULT '',
-                codigo_barras TEXT DEFAULT ''
+                codigo_barras TEXT DEFAULT '',
+                numero_ca TEXT DEFAULT ''
             );
             """)
+            # Garantir adição da coluna numero_ca caso a tabela já existisse sem ela
+            cursor.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS numero_ca TEXT DEFAULT '';")
             
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS historico (
@@ -282,14 +285,14 @@ def autenticar_usuario(usuario, senha_digitada):
 @st.cache_data(ttl=15)
 def buscar_produtos():
     conn = conectar()
-    return pd.read_sql_query("SELECT id, nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras FROM produtos ORDER BY id ASC", conn)
+    return pd.read_sql_query("SELECT id, nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras, numero_ca FROM produtos ORDER BY id ASC", conn)
 
-def cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida="Caixa", qtd_por_caixa=1, foto_path="", codigo_barras=""):
+def cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida="Caixa", qtd_por_caixa=1, foto_path="", codigo_barras="", numero_ca=""):
     conn = conectar()
     with conn.cursor() as cursor:
         cursor.execute(
-            "INSERT INTO produtos (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras)
+            "INSERT INTO produtos (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras, numero_ca) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras, numero_ca)
         )
     conn.commit()
     st.cache_data.clear()
@@ -297,7 +300,7 @@ def cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida="
 def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, responsavel_epi=""):
     if tipo == "SAÍDA" and qtd_mov > qtd_atual:
         return False, f"Estoque insuficiente! Saldo atual: {qtd_atual:.2f}"
-    nova_qtd = qtd_atual + qtd_mov if tipo == "ENTRADA" else qtd_atual - qtd_mov
+    nova_qtd = qtd_atual + qtd_mov if tipo.startswith("ENTRADA") or tipo.startswith("ESTORNO") else qtd_atual - qtd_mov
     conn = conectar()
     with conn.cursor() as cursor:
         cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
@@ -308,6 +311,26 @@ def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, respon
     conn.commit()
     st.cache_data.clear()
     return True, "Movimentação realizada com sucesso!"
+
+def estornar_movimentacao(historico_id, produto_id, quantidade, usuario_logado):
+    """Devolve a quantidade de uma saída ao estoque e registra o estorno."""
+    conn = conectar()
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT quantidade FROM produtos WHERE id = %s", (produto_id,))
+        res = cursor.fetchone()
+        if not res:
+            return False, "Produto não encontrado."
+        qtd_atual = res[0]
+        nova_qtd = qtd_atual + quantidade
+        
+        cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, produto_id))
+        cursor.execute(
+            "INSERT INTO historico (produto_id, tipo, quantidade, usuario, responsavel_epi) VALUES (%s, %s, %s, %s, %s)",
+            (produto_id, f"ESTORNO (Ref. Histórico #{historico_id})", quantidade, usuario_logado, "Estorno / Correção")
+        )
+    conn.commit()
+    st.cache_data.clear()
+    return True, f"Estorno concluído! {quantidade:.2f} unidade(s) devolvida(s) ao estoque."
 
 def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, usuario_logado, categoria="Geral", localizacao="Almoxarifado Principal"):
     valor_total = qtd_mov * valor_unit
@@ -407,8 +430,20 @@ def salvar_registro_checklist(usuario, pdf_path, observacao=""):
 def buscar_historico():
     conn = conectar()
     return pd.read_sql_query("""
-    SELECT h.id, p.nome as produto, p.categoria, h.tipo, h.quantidade, h.usuario, h.responsavel_epi, h.data_hora
+    SELECT h.id, h.produto_id, p.nome as produto, p.categoria, h.tipo, h.quantidade, h.usuario, h.responsavel_epi, h.data_hora
     FROM historico h LEFT JOIN produtos p ON h.produto_id = p.id ORDER BY h.id DESC
+    """, conn)
+
+@st.cache_data(ttl=10)
+def buscar_ultimas_saidas(limite=10):
+    conn = conectar()
+    return pd.read_sql_query(f"""
+    SELECT h.id, h.produto_id, p.nome as produto, h.quantidade, h.usuario, h.responsavel_epi, h.data_hora
+    FROM historico h 
+    JOIN produtos p ON h.produto_id = p.id 
+    WHERE h.tipo = 'SAÍDA'
+    ORDER BY h.id DESC 
+    LIMIT {limite}
     """, conn)
 
 # --- INTERFACE E NAVEGAÇÃO ---
@@ -519,9 +554,11 @@ if opcao == "📋 Consulta de Estoque":
             else:
                 return f"{row['quantidade']:.0f} Unidades"
         df_prod['Saldo Formatado'] = df_prod.apply(formatar_saldo, axis=1)
+        df_prod['Nº CA'] = df_prod['numero_ca'].apply(lambda x: str(x) if str(x).strip() else "N/A")
     else:
         df_prod['Status'] = pd.Series(dtype='str')
         df_prod['Saldo Formatado'] = pd.Series(dtype='str')
+        df_prod['Nº CA'] = pd.Series(dtype='str')
 
     c_busca1, c_busca2 = st.columns([2, 1])
     with c_busca1:
@@ -540,7 +577,7 @@ if opcao == "📋 Consulta de Estoque":
 
     col_tbl, col_exp = st.columns([4, 1])
     with col_tbl:
-        st.dataframe(df_prod[['id', 'codigo_barras', 'nome', 'categoria', 'localizacao', 'unidade_medida', 'Saldo Formatado', 'Status']], use_container_width=True)
+        st.dataframe(df_prod[['id', 'codigo_barras', 'nome', 'categoria', 'Nº CA', 'localizacao', 'unidade_medida', 'Saldo Formatado', 'Status']], use_container_width=True)
     with col_exp:
         if not df_prod.empty:
             st.download_button(
@@ -614,7 +651,8 @@ elif opcao == "📦 Retirada de Materiais":
         prod_selecionado = st.selectbox("Escolha o Item na Lista:", df_prod['nome'].tolist())
         row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
         
-        st.info(f"**Item:** {row['nome']} \n\n**Categoria:** {row['categoria']} \n\n**Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
+        ca_info = f" | **CA:** {row['numero_ca']}" if row['numero_ca'] else ""
+        st.info(f"**Item:** {row['nome']}{ca_info}\n\n**Categoria:** {row['categoria']} \n\n**Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
         
         if row['unidade_medida'] == 'Caixa':
             tipo_retirada = st.radio("Como deseja retirar?", ["Por Caixa", "Por Unidade"], horizontal=True)
@@ -626,11 +664,11 @@ elif opcao == "📦 Retirada de Materiais":
         else:
             qtd_mov_final = st.number_input(f"Qtd a Retirar ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0)
 
-        eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
+        eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper() or bool(str(row['numero_ca']).strip())
         responsavel_epi = ""
         if eh_epi:
             st.warning("⚠️ **ESTE ITEM É UM EPI!**")
-            responsavel_epi = st.text_input("👤 Nome/ Matrícula do Colaborador (OBRIGATÓRIO PARA EPI):")
+            responsavel_epi = st.text_input("👤 Nome / Matrícula do Colaborador (OBRIGATÓRIO PARA EPI):")
 
         if st.button("Confirmar Retirada de Item", type="primary"):
             if eh_epi and not responsavel_epi.strip():
@@ -642,6 +680,34 @@ elif opcao == "📦 Retirada de Materiais":
                     st.rerun()
                 else:
                     st.error(msg)
+
+    st.write("---")
+    st.subheader("🔄 Estorno e Correção de Retiradas Recentes (Últimos 10 Itens)")
+    st.caption("Caso tenha retirado um item por engano ou com quantidade errada, clique em 'Estornar' para devolver o saldo ao estoque.")
+    
+    df_saidas = buscar_ultimas_saidas(limite=10)
+    if df_saidas.empty:
+        st.write("Nenhuma saída recente para estorno.")
+    else:
+        for _, s_row in df_saidas.iterrows():
+            c_info, c_btn = st.columns([4, 1])
+            with c_info:
+                dt_f = pd.to_datetime(s_row['data_hora']).strftime('%d/%m/%Y %H:%M') if pd.notnull(s_row['data_hora']) else ""
+                resp = f" | Resp: {s_row['responsavel_epi']}" if s_row['responsavel_epi'] else ""
+                st.write(f"📌 **{s_row['produto']}** — Qtd: `{s_row['quantidade']}` | Usuário: `{s_row['usuario']}`{resp} | Data: `{dt_f}`")
+            with c_btn:
+                if st.button("↩️ Estornar", key=f"btn_est_{s_row['id']}"):
+                    ok_est, msg_est = estornar_movimentacao(
+                        historico_id=int(s_row['id']),
+                        produto_id=int(s_row['produto_id']),
+                        quantidade=float(s_row['quantidade']),
+                        usuario_logado=st.session_state.usuario
+                    )
+                    if ok_est:
+                        st.success(msg_est)
+                        st.rerun()
+                    else:
+                        st.error(msg_est)
 
 # --- ABA 4: CADASTRO DE PRODUTO ---
 elif opcao == "➕ Cadastrar Produto":
@@ -659,6 +725,12 @@ elif opcao == "➕ Cadastrar Produto":
             nome = st.text_input("Nome do Produto *")
             codigo_barras = st.text_input("🏷️ Código de Barras (Opcional)")
             categoria = st.text_input("Categoria (Ex: Ferramenta, Insumo, EPI)", value="Geral")
+            
+            eh_epi_check = st.checkbox("Este produto é um EPI?")
+            numero_ca = ""
+            if eh_epi_check or "EPI" in categoria.upper():
+                numero_ca = st.text_input("🛡️ Número do CA (Certificado de Aprovação):")
+                
             localizacao = st.text_input("Localização / Corredor", value="Almoxarifado Principal")
             
         with c2:
@@ -681,7 +753,7 @@ elif opcao == "➕ Cadastrar Produto":
                 foto_path = ""
                 if foto is not None:
                     foto_path = salvar_arquivo_seguro(foto, tipo="imagem")
-                cadastrar_produto(nome, categoria, localizacao, quantidade_total, unidade_medida, qtd_por_caixa, foto_path, codigo_barras)
+                cadastrar_produto(nome, categoria, localizacao, quantidade_total, unidade_medida, qtd_por_caixa, foto_path, codigo_barras, numero_ca)
                 st.success(f"Produto '{nome}' cadastrado com sucesso!")
                 st.rerun()
             else:
@@ -749,7 +821,7 @@ elif opcao == "📄 Entrada de NF (XML Auto)":
 # --- ABA 6: IMPORTAR DADOS (EXCEL / SHEETS) ---
 elif opcao == "📥 Importar Dados (Excel / Sheets)":
     st.title("📥 Importar Estoque em Lote via Excel")
-    st.markdown("Envie uma planilha com as colunas obrigatórias: **nome**, **categoria**, **localizacao**, **quantidade**, **unidade_medida**.")
+    st.markdown("Envie uma planilha com as colunas obrigatórias: **nome**, **categoria**, **localizacao**, **quantidade**, **unidade_medida** (opcional: **numero_ca**).")
     
     arquivo_excel = st.file_uploader("Selecione o arquivo Excel (.xlsx ou .xls)", type=["xlsx", "xls"])
     if arquivo_excel is not None:
@@ -766,7 +838,8 @@ elif opcao == "📥 Importar Dados (Excel / Sheets)":
                         categoria=str(r.get('categoria', 'Geral')),
                         localizacao=str(r.get('localizacao', 'Almoxarifado Principal')),
                         quantidade=float(r.get('quantidade', 0)),
-                        unidade_medida=str(r.get('unidade_medida', 'Unidade'))
+                        unidade_medida=str(r.get('unidade_medida', 'Unidade')),
+                        numero_ca=str(r.get('numero_ca', ''))
                     )
                     qtd_imp += 1
                 st.success(f"✅ {qtd_imp} produtos importados com sucesso!")
