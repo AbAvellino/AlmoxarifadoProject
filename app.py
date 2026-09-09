@@ -662,8 +662,16 @@ elif opcao == "📦 Retirada de Materiais":
         col1, col2 = st.columns(2)
         with col1:
             st.info(f"**Item:** {row['nome']} \n\n**Categoria:** {row['categoria']} \n\n**Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
+            
+            # Opção de escolha entre Caixas e Unidades avulsas
             if row['unidade_medida'] == 'Caixa':
-                qtd_mov_final = st.number_input(f"Qtd a Retirar (por Caixas com {row['qtd_por_caixa']} itens):", min_value=0.1, step=0.5, value=1.0) * row['qtd_por_caixa']
+                tipo_retirada = st.radio("Como deseja retirar?", ["Por Caixa", "Por Unidade"], horizontal=True)
+                
+                if tipo_retirada == "Por Caixa":
+                    qtd_caixas = st.number_input(f"Qtd de Caixas (cada uma com {row['qtd_por_caixa']} itens):", min_value=0.1, step=0.5, value=1.0)
+                    qtd_mov_final = qtd_caixas * row['qtd_por_caixa']
+                else:
+                    qtd_mov_final = st.number_input("Qtd de Unidades soltas:", min_value=1.0, step=1.0, value=1.0)
             else:
                 qtd_mov_final = st.number_input(f"Qtd a Retirar ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0)
 
@@ -733,171 +741,3 @@ elif opcao == "📄 Entrada de NF (XML Auto)":
                 st.write(f"**Fornecedor:** {dados_nfe['fornecedor']} | **CNPJ:** {dados_nfe['cnpj']}")
                 df_itens = pd.DataFrame(dados_nfe['itens'])
                 st.dataframe(df_itens, use_container_width=True)
-                
-                if st.button("Confirmar e Dar Entrada Automática no Estoque", type="primary"):
-                    count_sucesso = 0
-                    for item in dados_nfe['itens']:
-                        dar_entrada_nota_fiscal(dados_nfe['numero_nf'], dados_nfe['fornecedor'], dados_nfe['cnpj'], item['produto'], float(item['quantidade']), float(item['valor_unitario']), st.session_state.usuario)
-                        count_sucesso += 1
-                    st.success(f"Entrada concluída! {count_sucesso} itens atualizados/cadastrados.")
-                    st.rerun()
-            else:
-                st.error(dados_nfe)
-
-    with aba_manual:
-        with st.form("form_nf_manual"):
-            c1, c2 = st.columns(2)
-            with c1:
-                num_nf = st.text_input("Número da Nota Fiscal")
-                fornecedor = st.text_input("Fornecedor / Empresa")
-                cnpj = st.text_input("CNPJ (Opcional)")
-                nome_prod = st.text_input("Nome do Produto")
-            with c2:
-                qtd_nf = st.number_input("Quantidade Recebida", min_value=0.1, step=1.0)
-                val_unit = st.number_input("Valor Unitário (R$)", min_value=0.0, step=0.01, format="%.2f")
-                st.write(f"**Valor Total Estimado:** R$ {qtd_nf * val_unit:.2f}")
-
-            if st.form_submit_button("Salvar e Dar Entrada"):
-                if num_nf and fornecedor and nome_prod:
-                    dar_entrada_nota_fiscal(num_nf, fornecedor, cnpj, nome_prod, float(qtd_nf), float(val_unit), st.session_state.usuario)
-                    st.success("Nota Fiscal lançada e estoque atualizado com sucesso!")
-                    st.rerun()
-
-    st.write("---")
-    st.subheader("📋 Registros de Notas Fiscais Lançadas")
-    df_nf = buscar_notas_fiscais()
-    st.dataframe(df_nf, use_container_width=True)
-
-# --- ABA 6: IMPORTAR DADOS ---
-elif opcao == "📥 Importar Dados (Excel / Sheets)":
-    st.title("📥 Importação em Lote de Produtos")
-    tab_excel, tab_sheets = st.tabs(["📊 Importar de Planilha Excel (.xlsx)", "🌐 Importar de Google Sheets"])
-    
-    with tab_excel:
-        file_excel = st.file_uploader("Selecione o arquivo .xlsx:", type=["xlsx", "xls"])
-        if file_excel is not None:
-            try:
-                df_imp = pd.read_excel(file_excel)
-                st.dataframe(df_imp, use_container_width=True)
-                if st.button("Confirmar e Importar para o Banco", type="primary"):
-                    qtd_importados = 0
-                    for idx, row in df_imp.iterrows():
-                        cadastrar_produto(str(row['nome']), str(row.get('categoria', 'Geral')), str(row.get('localizacao', 'Não informada')), float(row.get('quantidade', 0)), str(row.get('unidade_medida', 'Caixa')), int(row.get('qtd_por_caixa', 1)), codigo_barras=str(row.get('codigo_barras', '')))
-                        qtd_importados += 1
-                    st.success(f"{qtd_importados} produtos cadastrados com sucesso!")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao ler arquivo Excel: {e}")
-
-    with tab_sheets:
-        sheet_id = st.text_input("ID da Planilha do Google Sheets:")
-        if sheet_id:
-            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-            try:
-                df_gsheets = pd.read_csv(url)
-                st.dataframe(df_gsheets, use_container_width=True)
-                if st.button("Importar Dados do Google Sheets", type="primary"):
-                    qtd_importados = 0
-                    for idx, row in df_gsheets.iterrows():
-                        cadastrar_produto(str(row['nome']), str(row.get('categoria', 'Geral')), str(row.get('localizacao', 'Não informada')), float(row.get('quantidade', 0)), str(row.get('unidade_medida', 'Caixa')), int(row.get('qtd_por_caixa', 1)), codigo_barras=str(row.get('codigo_barras', '')))
-                        qtd_importados += 1
-                    st.success(f"{qtd_importados} produtos importados!")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao acessar planilha: {e}")
-
-# --- ABA 7: DASHBOARD BI ---
-elif opcao == "📊 Dashboard Analytics (BI)":
-    st.title("📊 BI Dashboard - Indicadores do Almoxarifado")
-    df_prod = buscar_produtos()
-    df_hist = buscar_historico()
-
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    with kpi1:
-        st.metric("Total de Produtos", len(df_prod))
-    with kpi2:
-        itens_criticos = len(df_prod[df_prod['quantidade'] < 5]) if not df_prod.empty else 0
-        st.metric("Itens com Estoque Baixo", itens_criticos, delta_color="inverse")
-    with kpi3:
-        total_retiradas = len(df_hist[df_hist['tipo'] == 'SAÍDA']) if not df_hist.empty else 0
-        st.metric("Total de Retiradas", total_retiradas)
-    with kpi4:
-        retiradas_epi = len(df_hist[df_hist['responsavel_epi'] != '']) if not df_hist.empty else 0
-        st.metric("Retiradas de EPI", retiradas_epi)
-
-    st.write("---")
-    col_ranking, col_cat = st.columns([3, 2])
-    with col_ranking:
-        st.subheader("Top 10 Itens Mais Retirados")
-        if not df_hist.empty:
-            df_saidas = df_hist[df_hist['tipo'] == 'SAÍDA']
-            if not df_saidas.empty:
-                top10 = df_saidas.groupby('produto')['quantidade'].sum().reset_index()
-                top10 = top10.sort_values(by='quantidade', ascending=False).head(10)
-                st.bar_chart(top10.set_index('produto'))
-            else:
-                st.info("Nenhuma saída registrada até o momento.")
-        else:
-            st.info("Sem dados de histórico.")
-
-    with col_cat:
-        st.subheader("Distribuição por Categoria")
-        if not df_prod.empty:
-            cat_count = df_prod['categoria'].value_counts()
-            st.bar_chart(cat_count)
-
-# --- ABA 8: HISTÓRICO ---
-elif opcao == "📜 Histórico / Auditoria":
-    st.title("📜 Histórico e Auditoria de Movimentações")
-    df_hist = buscar_historico()
-    c1, c2 = st.columns([4, 1])
-    with c1:
-        st.dataframe(df_hist, use_container_width=True)
-    with c2:
-        if not df_hist.empty:
-            st.download_button(
-                label="📥 Exportar Excel",
-                data=gerar_excel_download(df_hist),
-                file_name="historico_movimentacoes.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-# --- ABA 9: GERENCIAR USUÁRIOS (ADMIN) ---
-elif opcao == "👥 Gerenciar Usuários" and st.session_state.perfil == "Admin":
-    st.title("👥 Gerenciamento de Usuários e Monitoramento")
-    df_usr = buscar_usuarios()
-    st.dataframe(df_usr[['id', 'usuario', 'perfil', 'status_online', 'ultima_atividade', 'localizacao_sessao']], use_container_width=True)
-    
-    st.write("---")
-    st.subheader("➕ Cadastrar Novo Usuário")
-    with st.form("form_cad_usr"):
-        u_nome = st.text_input("Nome do Usuário")
-        u_senha = st.text_input("Senha", type="password")
-        u_perfil = st.selectbox("Perfil de Acesso", ["Operador", "Admin"])
-        if st.form_submit_button("Cadastrar Usuário"):
-            ok, msg = cadastrar_usuario(u_nome, u_senha, u_perfil)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-# --- ABA 10: PERSONALIZAR EMPRESA (ADMIN) ---
-elif opcao == "⚙️ Personalizar Empresa" and st.session_state.perfil == "Admin":
-    st.title("⚙️ Configurações da Empresa e Layout")
-    with st.form("form_cfg"):
-        e_nome = st.text_input("Nome da Empresa", value=config['nome_empresa'])
-        e_cor = st.color_picker("Cor do Tema", value=config['cor_tema'])
-        e_logo = st.file_uploader("Atualizar Logomarca (Imagem)", type=["png", "jpg", "jpeg"])
-        e_mapa = st.file_uploader("Atualizar Mapa do Almoxarifado (PDF ou Imagem)", type=["pdf", "png", "jpg", "jpeg"])
-        
-        if st.form_submit_button("💾 Salvar Configurações"):
-            logo_p = config['logo_path']
-            mapa_p = config['mapa_path']
-            if e_logo is not None:
-                logo_p = salvar_arquivo_seguro(e_logo, tipo="imagem")
-            if e_mapa is not None:
-                mapa_p = salvar_arquivo_seguro(e_mapa, tipo="mapa")
-            salvar_configuracoes(e_nome, logo_p, e_cor, mapa_p)
-            st.success("Configurações atualizadas!")
-            st.rerun()
