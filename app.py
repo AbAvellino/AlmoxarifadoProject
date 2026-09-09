@@ -305,15 +305,21 @@ def excluir_produto(prod_id):
     st.cache_data.clear()
 
 def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, responsavel_epi=""):
-    if tipo == "SAÍDA" and qtd_mov > qtd_atual:
+    tipo_upper = tipo.upper()
+    if tipo_upper == "SAÍDA" and qtd_mov > qtd_atual:
         return False, f"Estoque insuficiente! Saldo atual: {qtd_atual:.2f}"
-    nova_qtd = qtd_atual + qtd_mov if tipo == "ENTRADA" else qtd_atual - qtd_mov
+        
+    if tipo_upper in ["ENTRADA", "DEVOLUÇÃO", "DEVOLUCAO"]:
+        nova_qtd = qtd_atual + qtd_mov
+    else:
+        nova_qtd = qtd_atual - qtd_mov
+        
     conn = conectar()
     with conn.cursor() as cursor:
         cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
         cursor.execute(
             "INSERT INTO historico (produto_id, tipo, quantidade, usuario, responsavel_epi) VALUES (%s, %s, %s, %s, %s)",
-            (prod_id, tipo, qtd_mov, usuario_logado, responsavel_epi)
+            (prod_id, tipo_upper, qtd_mov, usuario_logado, responsavel_epi)
         )
         conn.commit()
     st.cache_data.clear()
@@ -337,12 +343,11 @@ def estornar_movimentacao(historico_id, usuario_logado):
             
             qtd_atual = res_prod[0]
             
-            # Lógica de estorno oposta
-            if "ENTRADA" in tipo.upper():
+            if "ENTRADA" in tipo.upper() or "DEVOLUÇÃO" in tipo.upper() or "DEVOLUCAO" in tipo.upper():
                 if qtd_atual < quantidade:
-                    return False, f"Não é possível estornar esta Entrada. Saldo atual ({qtd_atual}) é menor que a quantidade do estorno ({quantidade})."
+                    return False, f"Não é possível estornar. Saldo atual ({qtd_atual}) é menor que a quantidade do estorno ({quantidade})."
                 nova_qtd = qtd_atual - quantidade
-                tipo_estorno = f"ESTORNO ENTRADA (ID #{historico_id})"
+                tipo_estorno = f"ESTORNO {tipo.upper()} (ID #{historico_id})"
             elif "SAÍDA" in tipo.upper() or "SAIDA" in tipo.upper():
                 nova_qtd = qtd_atual + quantidade
                 tipo_estorno = f"ESTORNO SAÍDA (ID #{historico_id})"
@@ -525,7 +530,7 @@ if config['mapa_path'] and os.path.exists(config['mapa_path']):
 opcoes_menu = [
     "📋 Consulta de Estoque",
     "🛠️ Checklist de Ferramentas",
-    "📤 Retirada de Materiais",
+    "📤 Retirada / Devolução de Materiais",
     "➕ Cadastrar Produto",
     "📥 Entrada de NF (XML Auto)",
     "📊 Importar Dados (Excel / Sheets)",
@@ -604,7 +609,6 @@ elif opcao == "🛠️ Checklist de Ferramentas":
     st.caption("Realize a conferência das ferramentas. Os EPIs e insumos de consumo não aparecem nesta tela.")
     df_prod = buscar_produtos()
     
-    # FILTRO ATUALIZADO: Seleciona Ferramenta ou Equipamento, mas EXCLUI categoricamente qualquer EPI
     if not df_prod.empty:
         filtro_incluir = df_prod['categoria'].str.contains("Ferramenta|Equipamento", case=False, na=False)
         filtro_excluir_epi = ~df_prod['categoria'].str.contains("EPI", case=False, na=False) & ~df_prod['nome'].str.contains("EPI", case=False, na=False)
@@ -646,7 +650,7 @@ elif opcao == "🛠️ Checklist de Ferramentas":
                     st.error(f"Erro ao gerar relatório: {e}")
                     
         st.write("---")
-        st.subheader("📁 Relatórios Salvos no Servidor (Máximo 3 Ativos)")
+        st.subheader("📁 Relatorios Salvos no Servidor (Máximo 3 Ativos)")
         pdfs_salvos = glob.glob(os.path.join("relatorios_checklist", "*.pdf"))
         pdfs_salvos.sort(key=os.path.getctime, reverse=True)
         if pdfs_salvos:
@@ -662,14 +666,19 @@ elif opcao == "🛠️ Checklist de Ferramentas":
         else:
             st.info("Nenhum relatório PDF disponível no momento.")
 
-#--- ABA 3: RETIRADA DE MATERIAIS ---
-elif opcao == "📤 Retirada de Materiais":
-    st.title("📤 Retirada e Saída de Materiais do Almoxarifado")
+#--- ABA 3: RETIRADA E DEVOLUÇÃO DE MATERIAIS ---
+elif opcao == "📤 Retirada / Devolução de Materiais":
+    st.title("📤 Retirada / Devolução de Materiais")
     df_prod = buscar_produtos()
     if df_prod.empty:
-        st.info("Nenhum produto cadastrado para retirada.")
+        st.info("Nenhum produto cadastrado.")
     else:
-        st.subheader("1️⃣ Selecionar Produto")
+        st.subheader("1️⃣ Tipo de Operação")
+        tipo_operacao = st.radio("Selecione a Ação:", ["Retirada (Saída)", "Devolução (Entrada/Reinserção)"], horizontal=True)
+        tipo_mov_banco = "SAÍDA" if "Retirada" in tipo_operacao else "DEVOLUÇÃO"
+        
+        st.write("---")
+        st.subheader("2️⃣ Selecionar Produto")
         cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:")
         prod_selecionado = None
         if cod_bipado.strip():
@@ -685,20 +694,19 @@ elif opcao == "📤 Retirada de Materiais":
             
         row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
         st.write("---")
-        st.subheader("2️⃣ Dados da Retirada")
+        st.subheader(f"3️⃣ Dados para {tipo_operacao}")
         col1, col2 = st.columns(2)
         with col1:
             st.info(f"**Item:** {row['nome']} \n\n**Categoria:** {row['categoria']} \n\n**Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
             
-            # 1º SOLICITAÇÃO: Escolha de Retirada por Caixa ou por Unidade
-            modo_retirada = st.radio("Modo de Retirada:", ["Por Unidade", "Por Caixa"], horizontal=True)
+            modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True)
             
-            if modo_retirada == "Por Caixa":
-                qtd_cx_input = st.number_input(f"Qtd a Retirar em Caixas (Cada caixa contém {row['qtd_por_caixa']} unidades):", min_value=0.1, step=1.0, value=1.0)
+            if modo_medida == "Por Caixa":
+                qtd_cx_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {row['qtd_por_caixa']} unidades):", min_value=0.1, step=1.0, value=1.0)
                 qtd_mov_final = qtd_cx_input * row['qtd_por_caixa']
-                st.caption(f"Total a ser baixado do estoque: **{qtd_mov_final:.2f} Unidades**")
+                st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
             else:
-                qtd_mov_final = st.number_input(f"Qtd a Retirar em Unidades ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0)
+                qtd_mov_final = st.number_input(f"Qtd em Unidades ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0)
                 
             eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
             responsavel_epi = ""
@@ -710,16 +718,17 @@ elif opcao == "📤 Retirada de Materiais":
                     st.info(f"**Número do CA do EPI:** {row['ca']}")
                 responsavel_epi = st.text_input("👤 Nome / Matrícula do Colaborador (OBRIGATÓRIO PARA EPI):")
             else:
-                st.write("Retirada padrão de almoxarifado.")
+                st.write(f"Operação padrão de almoxarifado: **{tipo_mov_banco}**.")
                 
         st.write("---")
-        if st.button("Confirmar Retirada de Item", type="primary"):
+        btn_label = "Confirmar Retirada de Item" if tipo_mov_banco == "SAÍDA" else "Confirmar Devolução e Recompor Estoque"
+        if st.button(btn_label, type="primary"):
             if eh_epi and not responsavel_epi.strip():
-                st.error("Erro: Preencha o nome/matrícula da pessoa que está retirando o EPI!")
+                st.error("Erro: Preencha o nome/matrícula da pessoa associada ao EPI!")
             else:
-                ok, msg = movimentar_produto(int(row['id']), "SAÍDA", float(qtd_mov_final), float(row['quantidade']), st.session_state.usuario, responsavel_epi)
+                ok, msg = movimentar_produto(int(row['id']), tipo_mov_banco, float(qtd_mov_final), float(row['quantidade']), st.session_state.usuario, responsavel_epi)
                 if ok:
-                    st.success(f"Retirada concluída! {msg}")
+                    st.success(f"Operação realizada com sucesso! {msg}")
                     st.rerun()
                 else:
                     st.error(msg)
@@ -733,7 +742,6 @@ elif opcao == "➕ Cadastrar Produto":
             nome = st.text_input("Nome do Produto *")
             codigo_barras = st.text_input("🔍 Código de Barras (Bipar ou Digitar)")
             categoria = st.text_input("Categoria (Ex: Ferramenta, Equipamento, EPI, Elétrica)", value="Geral")
-            # 3º SOLICITAÇÃO: Campo CA para EPIs
             ca = st.text_input("Número do CA (Certificado de Aprovação - Apenas para EPIs)")
             localizacao = st.text_input("Localização / Corredor / Prateleira", value="Almoxarifado Principal")
         with c2:
@@ -769,7 +777,6 @@ elif opcao == "📥 Entrada de NF (XML Auto)":
                 st.success(f"XML lido com sucesso! Nota Fiscal Nº **{dados_nfe['numero_nf']}**")
                 st.write(f"**Fornecedor:** {dados_nfe['fornecedor']} | **CNPJ:** {dados_nfe['cnpj']}")
                 
-                # 2º SOLICITAÇÃO: Permitir escolher qual item quer ou não cadastrar
                 st.subheader("Selecione os itens que deseja cadastrar/atualizar no estoque:")
                 df_itens = pd.DataFrame(dados_nfe['itens'])
                 df_itens.insert(0, "Selecionar", True)
@@ -900,7 +907,7 @@ elif opcao == "📈 Dashboard Analytics (BI)":
         st.metric("Total de Retiradas", total_retiradas)
     with kpi4:
         retiradas_epi = len(df_hist[df_hist['responsavel_epi'] != ""]) if not df_hist.empty else 0
-        st.metric("Retiradas de EPI", retiradas_epi)
+        st.metric("Retiradas/Devoluções de EPI", retiradas_epi)
         
     st.write("---")
     col_ranking, col_cat = st.columns([3, 2])
@@ -940,7 +947,6 @@ elif opcao == "📜 Histórico / Auditoria":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-    # 4º SOLICITAÇÃO: Correção / Estorno dos Últimos 10 Itens
     st.write("---")
     st.subheader("🔄 Estorno / Correção dos Últimos 10 Registros")
     st.caption("Utilize esta seção para cancelar uma movimentação incorreta efetuada recentemente.")
@@ -953,7 +959,6 @@ elif opcao == "📜 Histórico / Auditoria":
             with col_info:
                 st.write(f"**ID #{row['id']}** | Item: `{row['produto']}` | Tipo: `{row['tipo']}` | Qtd: `{row['quantidade']}` | Usuário: `{row['usuario']}` | Data: `{row['data_hora']}`")
             with col_btn:
-                # Tratamento preventivo de erro
                 desabilitado = "ESTORNO" in str(row['tipo']).upper()
                 if st.button(f"Estornar #{row['id']}", key=f"estorno_{row['id']}", disabled=desabilitado):
                     try:
