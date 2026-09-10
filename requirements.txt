@@ -1,5 +1,7 @@
-fpdf2
-pandas
-streamlit
-psycopg2-binary
-xlsxwriter
+streamlit>=1.30.0
+pandas>=2.0.0
+psycopg2-binary>=2.9.0
+gspread>=5.10.0
+google-auth>=2.20.0
+matplotlib>=3.7.0
+fpdf2>=2.7.0
