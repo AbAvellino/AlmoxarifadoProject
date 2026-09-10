@@ -1310,9 +1310,9 @@ elif opcao == "🦊 Raposa Assistente":
                         "parts": [{"text": m["content"]}]
                     })
                     
-                # Modelo gemini-2.5-flash atualizado para a SDK google-genai
+                # Modelo atualizado para gemini-3.6-flash
                 response = client_gemini.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=contents_history,
                 )
                 
