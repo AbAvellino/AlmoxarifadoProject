@@ -7,7 +7,6 @@ import re
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
-
 from fpdf import FPDF
 from google import genai
 import matplotlib.pyplot as plt
@@ -623,6 +622,7 @@ if opcao == "📦 Consulta de Estoque":
             st.error(f"🚨 **ATENÇÃO:** Existe(m) {len(df_zerados)} produto(s) com **ESTOQUE ZERADO**! Verifique a aba 'Pedidos de Compras'.")
         if not df_alertas.empty:
             st.warning(f"⚠️ **ALERTA:** Existe(m) {len(df_alertas)} produto(s) atingindo a **QUANTIDADE MÍNIMA**!")
+            
     bar_search = st.text_input("🔍 Bipar Código de Barras (Leitor USB/Bluetooth):", key="bar_search")
     
     if not df_prod.empty:
@@ -643,12 +643,14 @@ if opcao == "📦 Consulta de Estoque":
     else:
         df_prod['Status'] = pd.Series(dtype='str')
         df_prod['Saldo Formatado'] = pd.Series(dtype='str')
+        
     c_busca1, c_busca2 = st.columns([2, 1])
     with c_busca1:
         busca = st.text_input("🔎 Buscar por nome ou categoria:")
     with c_busca2:
         setores_cadastrados = sorted(df_prod['localizacao'].dropna().unique().tolist()) if not df_prod.empty else []
         setor_selecionado = st.selectbox("📍 Filtrar por Setor Cadastrado:", ["Todos"] + setores_cadastrados)
+        
     if not df_prod.empty:
         if bar_search.strip():
             df_prod = df_prod[df_prod['codigo_barras'].astype(str) == bar_search.strip()]
@@ -657,6 +659,7 @@ if opcao == "📦 Consulta de Estoque":
                 df_prod = df_prod[df_prod['nome'].str.contains(busca, case=False, na=False) | df_prod['categoria'].str.contains(busca, case=False, na=False)]
             if setor_selecionado != "Todos":
                 df_prod = df_prod[df_prod['localizacao'] == setor_selecionado]
+                
     col_tbl, col_exp = st.columns([4, 1])
     with col_tbl:
         cols_para_exibir = ['id', 'codigo_barras', 'nome', 'ca', 'categoria', 'localizacao', 'unidade_medida', 'qtd_minima', 'Saldo Formatado', 'Status']
@@ -670,6 +673,7 @@ if opcao == "📦 Consulta de Estoque":
                 file_name="estoque_atual.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+            
     if st.session_state.perfil == "Admin" and not df_prod.empty:
         st.write("---")
         st.subheader("🛠️ Ferramentas Avançadas de Admin (Edição / Mesclagem)")
@@ -698,6 +702,7 @@ if opcao == "📦 Consulta de Estoque":
                         editar_produto(item_edit_id, ed_nome, ed_categoria, ed_localizacao, ed_quantidade, ed_unidade, ed_qtd_cx, prod_row['foto_path'], ed_cod_barras, ed_ca, ed_qtd_minima)
                         st.success("Item do estoque atualizado!")
                         st.rerun()
+                        
         with tab_mesclar:
             st.caption("Junte o estoque e o histórico de dois ou mais registros idênticos ou de fornecedores/empresas diferentes em um único cadastro.")
             prod_destino_id = st.selectbox("Selecione o Produto DESTINO (Que será MANTIDO):", df_prod['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_prod[df_prod['id']==x]['nome'].values[0]}")
@@ -779,6 +784,7 @@ elif opcao == "📋 Checklist de Ferramentas":
         df_ferramentas = df_prod[filtro_incluir & filtro_excluir_epi]
     else:
         df_ferramentas = pd.DataFrame()
+        
     if df_ferramentas.empty:
         st.warning("Nenhuma ferramenta/equipamento cadastrado.")
     else:
@@ -812,6 +818,7 @@ elif opcao == "📋 Checklist de Ferramentas":
                         )
                 except Exception as e:
                     st.error(f"Erro ao gerar relatório: {e}")
+                    
         st.write("---")
         st.subheader("📂 Relatórios Salvos no Servidor (Máximo 3 Ativos)")
         pdfs_salvos = glob.glob(os.path.join("relatorios_checklist", "*.pdf"))
@@ -873,6 +880,7 @@ elif opcao == "🔄 Retirada / Devolução de Materiais":
                 st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
             else:
                 qtd_mov_final = st.number_input(f"Qtd em Unidades ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_un")
+                
         eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
         responsavel_epi = ""
         
@@ -884,6 +892,7 @@ elif opcao == "🔄 Retirada / Devolução de Materiais":
                 responsavel_epi = st.text_input("👤 Nome / Matrícula do Colaborador (OBRIGATÓRIO PARA EPI):", key="retirada_resp_epi")
             else:
                 st.write(f"Operação padrão de almoxarifado: **{tipo_mov_banco}**.")
+                
         st.write("---")
         btn_label = "Confirmar Retirada de Item" if tipo_mov_banco == "SAÍDA" else "Confirmar Devolução e Recompor Estoque"
         if st.button(btn_label, type="primary"):
@@ -1273,37 +1282,43 @@ elif opcao == "🎨 Personalizar Empresa" and st.session_state.perfil == "Admin"
 elif opcao == "🦊 Raposa Assistente":
     st.title("🦊 Raposa Assistente - Almoxarifado Inteligente")
     st.caption("Sua companheira ágil e astuta para tirar dúvidas, dar conselhos de organização e programar soluções!")
-
+    
     if not client_gemini:
         st.error("⚠️ Chave de API do Gemini não configurada em .streamlit/secrets.toml (GEMINI_API_KEY).")
     else:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
-
-        # Renderiza histórico da conversa
+            
+        # Renderiza o histórico da conversa
         for msg in st.session_state.chat_history:
             avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
             with st.chat_message(msg["role"], avatar=avatar_icon):
                 st.markdown(msg["content"])
-
+                
         # Caixa de mensagem do usuário
         if prompt := st.chat_input("Como posso ajudar com o almoxarifado hoje?"):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
                 st.markdown(prompt)
-
+                
             try:
-                # Faz a chamada para o modelo atualizado gemini-1.5-flash
+                # Converte o histórico no formato aceito pelo modelo oficial
+                contents_history = []
+                for m in st.session_state.chat_history:
+                    contents_history.append({
+                        "role": m["role"],
+                        "parts": [{"text": m["content"]}]
+                    })
+                    
+                # Modelo gemini-2.5-flash atualizado para a SDK google-genai
                 response = client_gemini.models.generate_content(
-                    model="gemini-1.5-flash",
-                    contents=prompt,
+                    model="gemini-2.5-flash",
+                    contents=contents_history,
                 )
-
+                
                 resposta = response.text
                 st.session_state.chat_history.append({"role": "assistant", "content": resposta})
-
                 with st.chat_message("assistant", avatar="🦊"):
                     st.markdown(resposta)
-
             except Exception as e:
                 st.error(f"Erro ao conversar com a Raposa Assistente: {e}")
