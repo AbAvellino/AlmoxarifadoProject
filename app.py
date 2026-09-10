@@ -1,16 +1,19 @@
-import hashlib
-import os
-import uuid
-import io
+import datetime
 import glob
+import hashlib
+import io
+import os
+import re
+import uuid
 import xml.etree.ElementTree as ET
-import pandas as pd
-import streamlit as st
-import psycopg2
-from fpdf import FPDF
 from datetime import datetime
+
+from fpdf import FPDF
 from google import genai
-from google.genai import types
+import matplotlib.pyplot as plt
+import pandas as pd
+import psycopg2
+import streamlit as st
 
 # Configuração da página Streamlit
 st.set_page_config(page_title="Sistema de Almoxarifado", layout="wide", page_icon="📦")
@@ -20,15 +23,17 @@ for pasta in ["uploads", "relatorios_checklist"]:
     if not os.path.exists(pasta):
         os.makedirs(pasta)
 
-# --- CLIENTE GEMINI (ASSISTENTE VIRTUAL)
+# --- INICIALIZAÇÃO DA API DO GEMINI (RAPOSA ASSISTENTE) ---
 @st.cache_resource
-def obter_cliente_gemini():
-    api_key = st.secrets.get("GEMINI_API_KEY", "")
+def init_gemini():
+    api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         return None
     return genai.Client(api_key=api_key)
 
-# --- MÓDULO DE SEGURANÇA E ARQUIVOS
+client_gemini = init_gemini()
+
+# --- MÓDULO DE SEGURANÇA E ARQUIVOS ---
 def gerar_hash_senha(senha: str) -> str:
     salt = os.urandom(16)
     hash_bytes = hashlib.pbkdf2_hmac('sha256', senha.encode('utf-8'), salt, 100000)
@@ -74,7 +79,7 @@ def gerar_excel_download(df: pd.DataFrame, nome_arquivo="relatorio.xlsx") -> byt
         df.to_excel(writer, index=False, sheet_name='Relatório')
     return output.getvalue()
 
-# --- LÓGICA DE GERENCIAMENTO DE PDF E LIMPEZA
+# --- LÓGICA DE GERENCIAMENTO DE PDF E LIMPEZA ---
 def gerenciar_limpeza_pdf_pasta(pasta="relatorios_checklist"):
     arquivos = glob.glob(os.path.join(pasta, "*.pdf"))
     arquivos.sort(key=os.path.getctime)
@@ -177,12 +182,10 @@ def inicializar_banco():
                 cursor.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS ca TEXT DEFAULT '';")
             except Exception:
                 pass
-
             try:
                 cursor.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS qtd_minima REAL DEFAULT 5.0;")
             except Exception:
                 pass
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS historico (
                 id SERIAL PRIMARY KEY,
@@ -194,7 +197,6 @@ def inicializar_banco():
                 data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -211,7 +213,6 @@ def inicializar_banco():
                 cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS acao_atual TEXT DEFAULT 'Navegando no Sistema';")
             except Exception:
                 pass
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS notas_fiscais (
                 id SERIAL PRIMARY KEY,
@@ -226,7 +227,6 @@ def inicializar_banco():
                 usuario TEXT DEFAULT 'Sistema'
             );
             """)
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS checklist_ferramentas (
                 id SERIAL PRIMARY KEY,
@@ -236,27 +236,6 @@ def inicializar_banco():
                 observacao TEXT DEFAULT ''
             );
             """)
-
-            # Tabelas da Raposa Assistente Virtual (Histórico e Aprendizado)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS historico_chat (
-                id SERIAL PRIMARY KEY,
-                usuario TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            """)
-
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS memorias_usuario (
-                id SERIAL PRIMARY KEY,
-                usuario TEXT NOT NULL,
-                memoria TEXT NOT NULL,
-                data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            """)
-
             cursor.execute("SELECT COUNT(*) FROM usuarios")
             if cursor.fetchone()[0] == 0:
                 cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("admin", gerar_hash_senha("1234"), "Admin"))
@@ -271,7 +250,7 @@ if 'banco_inicializado' not in st.session_state:
     inicializar_banco()
     st.session_state.banco_inicializado = True
 
-# --- CONSULTAS BANCO DE DADOS
+# --- CONSULTAS BANCO DE DADOS ---
 def atualizar_presenca_usuario(usuario, localizacao="Almoxarifado Principal", acao="Navegando no Sistema"):
     try:
         conn = conectar()
@@ -532,33 +511,6 @@ def buscar_historico():
         FROM historico h LEFT JOIN produtos p ON h.produto_id = p.id ORDER BY h.id DESC
     """, conn)
 
-# --- FUNÇÕES DE MEMÓRIA E CHAT DA RAPOSA ASSISTENTE
-def carregar_chat_usuario(usuario):
-    conn = conectar()
-    df = pd.read_sql_query("SELECT role, content FROM historico_chat WHERE usuario = %s ORDER BY id ASC", conn, params=(usuario,))
-    if df.empty:
-        return []
-    return df.to_dict(orient="records")
-
-def salvar_mensagem_chat(usuario, role, content):
-    conn = conectar()
-    with conn.cursor() as cursor:
-        cursor.execute("INSERT INTO historico_chat (usuario, role, content) VALUES (%s, %s, %s)", (usuario, role, content))
-    conn.commit()
-
-def buscar_memorias_usuario(usuario):
-    conn = conectar()
-    df = pd.read_sql_query("SELECT memoria FROM memorias_usuario WHERE usuario = %s ORDER BY id DESC LIMIT 5", conn, params=(usuario,))
-    if df.empty:
-        return "Nenhuma preferência registrada ainda."
-    return "; ".join(df['memoria'].tolist())
-
-def salvar_memoria_usuario(usuario, memoria):
-    conn = conectar()
-    with conn.cursor() as cursor:
-        cursor.execute("INSERT INTO memorias_usuario (usuario, memoria) VALUES (%s, %s)", (usuario, memoria))
-    conn.commit()
-
 # --- INTERFACE E NAVEGAÇÃO ---
 config = buscar_configuracoes()
 st.markdown(f"""
@@ -602,18 +554,17 @@ if not st.session_state.logado:
                 st.error("Usuário ou senha incorretos!")
     st.stop()
 
-# Reorganização das opções do menu com a Raposa Assistente
+# Reorganização das opções do menu conforme permissão do perfil
 if st.session_state.perfil == "Operador":
     opcoes_menu = [
-        "🦊 Raposa Assistente",
         "📦 Consulta de Estoque",
         "🛒 Pedidos de Compras (Itens Faltantes)",
         "➕ Cadastrar Produto",
-        "🔄 Retirada / Devolução de Materiais"
+        "🔄 Retirada / Devolução de Materiais",
+        "🦊 Raposa Assistente"
     ]
 else:
     opcoes_menu = [
-        "🦊 Raposa Assistente",
         "📦 Consulta de Estoque",
         "🛒 Pedidos de Compras (Itens Faltantes)",
         "📋 Checklist de Ferramentas",
@@ -625,14 +576,14 @@ else:
         "📈 Dashboard Analytics (BI)",
         "📜 Histórico / Auditoria",
         "👥 Gerenciar Usuários",
-        "🎨 Personalizar Empresa"
+        "🎨 Personalizar Empresa",
+        "🦊 Raposa Assistente"
     ]
 
 st.sidebar.title(config['nome_empresa'])
 st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
 if config['logo_path'] and os.path.exists(config['logo_path']):
     st.sidebar.image(config['logo_path'], use_container_width=True)
-
 if config['mapa_path'] and os.path.exists(config['mapa_path']):
     st.sidebar.write("---")
     st.sidebar.subheader("🗺️ Layout / Mapa")
@@ -658,98 +609,12 @@ if st.sidebar.button("🚪 Sair / Logout"):
     st.session_state.perfil = ""
     st.rerun()
 
-# --- ABA 0: RAPOSA ASSISTENTE VIRTUAL ---
-if opcao == "🦊 Raposa Assistente":
-    st.title("🦊 Raposa Assistente - Almoxarifado Inteligente")
-    st.caption("Sua companheira ágil e astuta para tirar dúvidas, dar conselhos de organização e programar soluções!")
-
-    client_gemini = obter_cliente_gemini()
-    
-    if not client_gemini:
-        st.error("⚠️ Chave de API do Gemini não configurada em `.streamlit/secrets.toml` (`GEMINI_API_KEY`).")
-    else:
-        usuario_atual = st.session_state.usuario
-        perfil_atual = st.session_state.perfil
-        
-        df_prod = buscar_produtos()
-        resumo_estoque = "O estoque está vazio."
-        if not df_prod.empty:
-            total_itens = len(df_prod)
-            criticos = len(df_prod[df_prod['quantidade'] <= df_prod['qtd_minima']])
-            resumo_estoque = f"Possuímos {total_itens} produtos cadastrados e {criticos} itens em nível crítico/zerado."
-
-        memorias_aprendidas = buscar_memorias_usuario(usuario_atual)
-
-        system_instruction = f"""
-        Você é o 'Raposão' (ou Raposa Assistente 🦊), mascote e assistente virtual inteligente do almoxarifado da empresa '{config['nome_empresa']}'.
-        
-        Sua Personalidade:
-        - Astuta, rápida, amigável, inteligente e proativa. Usa um tom respeitoso e dinâmico.
-        - Você está conversando diretamente com '{usuario_atual}', perfil '{perfil_atual}'.
-
-        Suas Regras e Objetivos:
-        1. Responda com cordialidade e precisão a qualquer dúvida sobre o almoxarifado.
-        2. Dicas e Aprendizado: Dê sugestões de gestão de estoque, controle de EPIs, curva ABC e organização física.
-        3. Programação: Se pedirem códigos (Python, SQL, HTML, etc.), escreva códigos limpos, funcionais e comentados.
-        
-        Contexto do Estoque: {resumo_estoque}
-        Memórias aprendidas sobre {usuario_atual}: {memorias_aprendidas}
-        """
-
-        if "chat_messages" not in st.session_state or st.session_state.get("chat_user") != usuario_atual:
-            historico_banco = carregar_chat_usuario(usuario_atual)
-            if historico_banco:
-                st.session_state.chat_messages = historico_banco
-            else:
-                msg_inicial = f"Olá, **{usuario_atual}**! 🦊 Sou sua Raposa Assistente! Como posso te ajudar hoje no almoxarifado? Posso tirar dúvidas, dar dicas ou programar rotinas!"
-                st.session_state.chat_messages = [{"role": "model", "content": msg_inicial}]
-                salvar_mensagem_chat(usuario_atual, "model", msg_inicial)
-            st.session_state.chat_user = usuario_atual
-
-        for msg in st.session_state.chat_messages:
-            avatar = "🦊" if msg["role"] == "model" else "👤"
-            with st.chat_message(msg["role"], avatar=avatar):
-                st.markdown(msg["content"])
-
-        if prompt := st.chat_input("Pergunte à Raposa ou peça um conselho/código..."):
-            with st.chat_message("user", avatar="👤"):
-                st.markdown(prompt)
-            st.session_state.chat_messages.append({"role": "user", "content": prompt})
-            salvar_mensagem_chat(usuario_atual, "user", prompt)
-
-            contents_history = []
-            for m in st.session_state.chat_messages:
-                role_mapped = "user" if m["role"] == "user" else "model"
-                contents_history.append(
-                    types.Content(
-                        role=role_mapped,
-                        parts=[types.Part.from_text(text=m["content"])]
-                    )
-                )
-
-            with st.chat_message("model", avatar="🦊"):
-                with st.spinner("A Raposa está pensando... 🦊💭"):
-                    try:
-                        response = client_gemini.models.generate_content(
-                            model="gemini-2.5-flash",
-                            contents=contents_history,
-                            config=types.GenerateContentConfig(
-                                system_instruction=system_instruction,
-                                temperature=0.7,
-                            )
-                        )
-                        resposta_texto = response.text
-                        st.markdown(resposta_texto)
-                        st.session_state.chat_messages.append({"role": "model", "content": resposta_texto})
-                        salvar_mensagem_chat(usuario_atual, "model", resposta_texto)
-                    except Exception as e:
-                        st.error(f"Erro ao conversar com a Raposa: {e}")
-
 # --- ABA 1: CONSULTA DE ESTOQUE ---
-elif opcao == "📦 Consulta de Estoque":
+if opcao == "📦 Consulta de Estoque":
     st.title(f"📦 Controle de Estoque - {config['nome_empresa']}")
     df_prod = buscar_produtos()
     
+    # ALERTAS DE ESTOQUE ZERANDO / ZERADO
     if not df_prod.empty:
         df_zerados = df_prod[df_prod['quantidade'] <= 0]
         df_alertas = df_prod[(df_prod['quantidade'] > 0) & (df_prod['quantidade'] <= df_prod['qtd_minima'])]
@@ -758,7 +623,6 @@ elif opcao == "📦 Consulta de Estoque":
             st.error(f"🚨 **ATENÇÃO:** Existe(m) {len(df_zerados)} produto(s) com **ESTOQUE ZERADO**! Verifique a aba 'Pedidos de Compras'.")
         if not df_alertas.empty:
             st.warning(f"⚠️ **ALERTA:** Existe(m) {len(df_alertas)} produto(s) atingindo a **QUANTIDADE MÍNIMA**!")
-
     bar_search = st.text_input("🔍 Bipar Código de Barras (Leitor USB/Bluetooth):", key="bar_search")
     
     if not df_prod.empty:
@@ -779,14 +643,12 @@ elif opcao == "📦 Consulta de Estoque":
     else:
         df_prod['Status'] = pd.Series(dtype='str')
         df_prod['Saldo Formatado'] = pd.Series(dtype='str')
-
     c_busca1, c_busca2 = st.columns([2, 1])
     with c_busca1:
         busca = st.text_input("🔎 Buscar por nome ou categoria:")
     with c_busca2:
         setores_cadastrados = sorted(df_prod['localizacao'].dropna().unique().tolist()) if not df_prod.empty else []
         setor_selecionado = st.selectbox("📍 Filtrar por Setor Cadastrado:", ["Todos"] + setores_cadastrados)
-
     if not df_prod.empty:
         if bar_search.strip():
             df_prod = df_prod[df_prod['codigo_barras'].astype(str) == bar_search.strip()]
@@ -795,13 +657,11 @@ elif opcao == "📦 Consulta de Estoque":
                 df_prod = df_prod[df_prod['nome'].str.contains(busca, case=False, na=False) | df_prod['categoria'].str.contains(busca, case=False, na=False)]
             if setor_selecionado != "Todos":
                 df_prod = df_prod[df_prod['localizacao'] == setor_selecionado]
-
     col_tbl, col_exp = st.columns([4, 1])
     with col_tbl:
         cols_para_exibir = ['id', 'codigo_barras', 'nome', 'ca', 'categoria', 'localizacao', 'unidade_medida', 'qtd_minima', 'Saldo Formatado', 'Status']
         cols_existentes = [c for c in cols_para_exibir if c in df_prod.columns]
         st.dataframe(df_prod[cols_existentes], use_container_width=True)
-
     with col_exp:
         if not df_prod.empty:
             st.download_button(
@@ -810,7 +670,6 @@ elif opcao == "📦 Consulta de Estoque":
                 file_name="estoque_atual.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
     if st.session_state.perfil == "Admin" and not df_prod.empty:
         st.write("---")
         st.subheader("🛠️ Ferramentas Avançadas de Admin (Edição / Mesclagem)")
@@ -821,7 +680,7 @@ elif opcao == "📦 Consulta de Estoque":
             item_edit_id = st.selectbox("Selecione o Item para Editar:", df_prod['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_prod[df_prod['id']==x]['nome'].values[0]}")
             if item_edit_id:
                 prod_row = df_prod[df_prod['id'] == item_edit_id].iloc[0]
-                with st.form("form_edit_admin"):
+                with st.form("form_edit_admin", clear_on_submit=True):
                     ed_c1, ed_c2 = st.columns(2)
                     with ed_c1:
                         ed_nome = st.text_input("Nome do Produto", value=prod_row['nome'])
@@ -839,9 +698,8 @@ elif opcao == "📦 Consulta de Estoque":
                         editar_produto(item_edit_id, ed_nome, ed_categoria, ed_localizacao, ed_quantidade, ed_unidade, ed_qtd_cx, prod_row['foto_path'], ed_cod_barras, ed_ca, ed_qtd_minima)
                         st.success("Item do estoque atualizado!")
                         st.rerun()
-
         with tab_mesclar:
-            st.caption("Junte o estoque e o histórico de dois ou mais registros idênticos em um único cadastro.")
+            st.caption("Junte o estoque e o histórico de dois ou mais registros idênticos ou de fornecedores/empresas diferentes em um único cadastro.")
             prod_destino_id = st.selectbox("Selecione o Produto DESTINO (Que será MANTIDO):", df_prod['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_prod[df_prod['id']==x]['nome'].values[0]}")
             
             outros_prods = df_prod[df_prod['id'] != prod_destino_id]
@@ -855,7 +713,7 @@ elif opcao == "📦 Consulta de Estoque":
                 else:
                     st.warning("Selecione ao menos um produto de origem para mesclar.")
 
-# --- ABA 2: PEDIDOS DE COMPRAS ---
+# --- ABA DE PEDIDOS DE COMPRAS ---
 elif opcao == "🛒 Pedidos de Compras (Itens Faltantes)":
     st.title("🛒 Gerador de Pedidos de Compras & Itens Faltantes")
     st.caption("Esta aba monitora automaticamente os produtos com estoque zerado ou abaixo do limite mínimo cadastrado.")
@@ -885,6 +743,7 @@ elif opcao == "🛒 Pedidos de Compras (Itens Faltantes)":
             st.subheader("📋 Lista para Solicitação de Compras")
             
             cols_pedidos = ['id', 'nome', 'categoria', 'localizacao', 'quantidade', 'qtd_minima', 'Qtd a Comprar (Sugestão)', 'unidade_medida', 'Status']
+            
             st.dataframe(df_faltantes[cols_pedidos], use_container_width=True)
             
             st.write("---")
@@ -908,7 +767,7 @@ elif opcao == "🛒 Pedidos de Compras (Itens Faltantes)":
                     type="primary"
                 )
 
-# --- ABA 3: CHECKLIST DE FERRAMENTAS ---
+# --- ABA 2: CHECKLIST DE FERRAMENTAS ---
 elif opcao == "📋 Checklist de Ferramentas":
     st.title("📋 Checklist de Ferramentas e Equipamentos")
     st.caption("Realize a conferência das ferramentas. Os EPIs e insumos de consumo não aparecem nesta tela.")
@@ -924,7 +783,7 @@ elif opcao == "📋 Checklist de Ferramentas":
         st.warning("Nenhuma ferramenta/equipamento cadastrado.")
     else:
         st.subheader("📝 Lista de Verificação")
-        with st.form("form_checklist"):
+        with st.form("form_checklist", clear_on_submit=True):
             itens_checklist = []
             for idx, row in df_ferramentas.iterrows():
                 st.markdown(f"**Item:** '{row['nome']}' | Local: *{row['localizacao']}*")
@@ -971,7 +830,7 @@ elif opcao == "📋 Checklist de Ferramentas":
         else:
             st.info("Nenhum relatório PDF disponível no momento.")
 
-# --- ABA 4: RETIRADA E DEVOLUÇÃO DE MATERIAIS ---
+# --- ABA 3: RETIRADA E DEVOLUÇÃO DE MATERIAIS ---
 elif opcao == "🔄 Retirada / Devolução de Materiais":
     st.title("🔄 Retirada / Devolução de Materiais")
     df_prod = buscar_produtos()
@@ -985,7 +844,7 @@ elif opcao == "🔄 Retirada / Devolução de Materiais":
         
         st.write("---")
         st.subheader("2️⃣ Selecionar Produto")
-        cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:")
+        cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:", key="retirada_cod_bipado")
         
         prod_selecionado = None
         if cod_bipado.strip():
@@ -997,7 +856,7 @@ elif opcao == "🔄 Retirada / Devolução de Materiais":
                 st.warning("Código de barras não encontrado no cadastro.")
                 
         if not prod_selecionado:
-            prod_selecionado = st.selectbox("Ou Escolha o Item na Lista:", df_prod['nome'].tolist())
+            prod_selecionado = st.selectbox("Ou Escolha o Item na Lista:", df_prod['nome'].tolist(), key="retirada_select_item")
             
         row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
         
@@ -1006,14 +865,14 @@ elif opcao == "🔄 Retirada / Devolução de Materiais":
         col1, col2 = st.columns(2)
         with col1:
             st.info(f"**Item:** {row['nome']} \n\n**Categoria:** {row['categoria']} \n\n**Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
-            modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True)
+            modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key="retirada_modo_medida")
             
             if modo_medida == "Por Caixa":
-                qtd_cx_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {row['qtd_por_caixa']} unidades):", min_value=0.1, step=1.0, value=1.0)
+                qtd_cx_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {row['qtd_por_caixa']} unidades):", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_cx")
                 qtd_mov_final = qtd_cx_input * row['qtd_por_caixa']
                 st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
             else:
-                qtd_mov_final = st.number_input(f"Qtd em Unidades ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0)
+                qtd_mov_final = st.number_input(f"Qtd em Unidades ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_un")
         eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
         responsavel_epi = ""
         
@@ -1022,7 +881,7 @@ elif opcao == "🔄 Retirada / Devolução de Materiais":
                 st.warning("⚠️ **ESTE ITEM É UM EPI!**")
                 if row.get('ca'):
                     st.info(f"**Número do CA do EPI:** {row['ca']}")
-                responsavel_epi = st.text_input("👤 Nome / Matrícula do Colaborador (OBRIGATÓRIO PARA EPI):")
+                responsavel_epi = st.text_input("👤 Nome / Matrícula do Colaborador (OBRIGATÓRIO PARA EPI):", key="retirada_resp_epi")
             else:
                 st.write(f"Operação padrão de almoxarifado: **{tipo_mov_banco}**.")
         st.write("---")
@@ -1034,14 +893,19 @@ elif opcao == "🔄 Retirada / Devolução de Materiais":
                 ok, msg = movimentar_produto(int(row['id']), tipo_mov_banco, float(qtd_mov_final), float(row['quantidade']), st.session_state.usuario, responsavel_epi)
                 if ok:
                     st.success(f"Operação realizada com sucesso! {msg}")
+                    # Limpa o código bipado do estado
+                    if "retirada_cod_bipado" in st.session_state:
+                        st.session_state.retirada_cod_bipado = ""
+                    if "retirada_resp_epi" in st.session_state:
+                        st.session_state.retirada_resp_epi = ""
                     st.rerun()
                 else:
                     st.error(msg)
 
-# --- ABA 5: CADASTRO DE PRODUTO ---
+# --- ABA 4: CADASTRO DE PRODUTO ---
 elif opcao == "➕ Cadastrar Produto":
     st.title("➕ Cadastrar Novo Produto")
-    with st.form("form_cad_prod"):
+    with st.form("form_cad_prod", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
             nome = st.text_input("Nome do Produto *")
@@ -1069,7 +933,7 @@ elif opcao == "➕ Cadastrar Produto":
             else:
                 st.warning("O nome do produto é obrigatório!")
 
-# --- ABA 6: ENTRADA POR NOTA FISCAL ---
+# --- ABA 5: ENTRADA POR NOTA FISCAL ---
 elif opcao == "📑 Entrada de NF (XML Auto)":
     st.title("📥 Recebimento e Entrada por Nota Fiscal")
     aba_xml, aba_manual = st.tabs(["📄 Importar Arquivo XML (Automático)", "✍️ Lançamento Manual"])
@@ -1114,7 +978,7 @@ elif opcao == "📑 Entrada de NF (XML Auto)":
             else:
                 st.error(dados_nfe)
     with aba_manual:
-        with st.form("form_nf_manual"):
+        with st.form("form_nf_manual", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 num_nf = st.text_input("Número da Nota Fiscal")
@@ -1131,7 +995,7 @@ elif opcao == "📑 Entrada de NF (XML Auto)":
                     st.success("Nota Fiscal lançada e estoque atualizado com sucesso!")
                     st.rerun()
 
-# --- ABA 7: CONSULTAR NFs SUBIDAS ---
+# --- ABA 6: CONSULTAR NFs SUBIDAS ---
 elif opcao == "📄 Consultar NFs Subidas":
     st.title("📄 Relatório e Consulta de Notas Fiscais Lançadas")
     df_nf = buscar_notas_fiscais()
@@ -1160,7 +1024,7 @@ elif opcao == "📄 Consultar NFs Subidas":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-# --- ABA 8: IMPORTAR DADOS ---
+# --- ABA 7: IMPORTAR DADOS ---
 elif opcao == "📊 Importar Dados (Excel / Sheets)":
     st.title("📊 Importação em Lote de Produtos")
     tab_excel, tab_sheets = st.tabs(["📄 Importar de Planilha Excel (.xlsx)", "🌐 Importar de Google Sheets"])
@@ -1216,13 +1080,13 @@ elif opcao == "📊 Importar Dados (Excel / Sheets)":
             except Exception as e:
                 st.error(f"Erro ao acessar planilha: {e}")
 
-# --- ABA 9: DASHBOARD BI ---
+# --- ABA 8: DASHBOARD BI ---
 elif opcao == "📈 Dashboard Analytics (BI)":
     st.title("📈 BI Dashboard - Indicadores do Almoxarifado")
     df_prod = buscar_produtos()
     df_hist = buscar_historico()
     df_nf = buscar_notas_fiscais()
-    
+    # Métricas Gerais
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     with kpi1:
         st.metric("Total de Produtos", len(df_prod))
@@ -1304,7 +1168,7 @@ elif opcao == "📈 Dashboard Analytics (BI)":
             cat_count = df_prod['categoria'].value_counts()
             st.bar_chart(cat_count)
 
-# --- ABA 10: HISTÓRICO E ESTORNO ---
+# --- ABA 9: HISTÓRICO E ESTORNO ---
 elif opcao == "📜 Histórico / Auditoria":
     st.title("📜 Histórico e Auditoria de Movimentações")
     df_hist = buscar_historico()
@@ -1344,7 +1208,7 @@ elif opcao == "📜 Histórico / Auditoria":
     else:
         st.info("Nenhum histórico registrado para exibição de estornos.")
 
-# --- ABA 11: GERENCIAR USUÁRIOS (ADMIN) ---
+# --- ABA 10: GERENCIAR USUÁRIOS (ADMIN) ---
 elif opcao == "👥 Gerenciar Usuários" and st.session_state.perfil == "Admin":
     st.title("👥 Gerenciamento de Usuários e Monitoramento")
     
@@ -1359,7 +1223,7 @@ elif opcao == "👥 Gerenciar Usuários" and st.session_state.perfil == "Admin":
     user_edit_id = st.selectbox("Selecione o Usuário para Editar:", df_usr['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_usr[df_usr['id']==x]['usuario'].values[0]}")
     if user_edit_id:
         usr_row = df_usr[df_usr['id'] == user_edit_id].iloc[0]
-        with st.form("form_edit_usr"):
+        with st.form("form_edit_usr", clear_on_submit=True):
             ed_u_nome = st.text_input("Nome do Usuário", value=usr_row['usuario'])
             ed_u_perfil = st.selectbox("Perfil de Acesso", ["Operador", "Admin"], index=["Operador", "Admin"].index(usr_row['perfil']))
             ed_u_senha = st.text_input("Nova Senha (Deixe em branco para manter a senha atual)", type="password")
@@ -1373,7 +1237,7 @@ elif opcao == "👥 Gerenciar Usuários" and st.session_state.perfil == "Admin":
                     st.error(msg)
     st.write("---")
     st.subheader("➕ Cadastrar Novo Usuário")
-    with st.form("form_cad_usr"):
+    with st.form("form_cad_usr", clear_on_submit=True):
         u_nome = st.text_input("Nome do Usuário")
         u_senha = st.text_input("Senha", type="password")
         u_perfil = st.selectbox("Perfil de Acesso", ["Operador", "Admin"])
@@ -1385,10 +1249,10 @@ elif opcao == "👥 Gerenciar Usuários" and st.session_state.perfil == "Admin":
             else:
                 st.error(msg)
 
-# --- ABA 12: PERSONALIZAR EMPRESA (ADMIN) ---
+# --- ABA 11: PERSONALIZAR EMPRESA (ADMIN) ---
 elif opcao == "🎨 Personalizar Empresa" and st.session_state.perfil == "Admin":
     st.title("🎨 Configurações da Empresa e Layout")
-    with st.form("form_cfg"):
+    with st.form("form_cfg", clear_on_submit=True):
         e_nome = st.text_input("Nome da Empresa", value=config['nome_empresa'])
         e_cor = st.color_picker("Cor do Tema", value=config['cor_tema'])
         e_logo = st.file_uploader("Atualizar Logomarca (Imagem)", type=["png", "jpg", "jpeg"])
@@ -1404,3 +1268,42 @@ elif opcao == "🎨 Personalizar Empresa" and st.session_state.perfil == "Admin"
             salvar_configuracoes(e_nome, logo_p, e_cor, mapa_p)
             st.success("Configurações atualizadas!")
             st.rerun()
+
+# --- ABA 12: RAPOSA ASSISTENTE (GEMINI AI) ---
+elif opcao == "🦊 Raposa Assistente":
+    st.title("🦊 Raposa Assistente - Almoxarifado Inteligente")
+    st.caption("Sua companheira ágil e astuta para tirar dúvidas, dar conselhos de organização e programar soluções!")
+
+    if not client_gemini:
+        st.error("⚠️ Chave de API do Gemini não configurada em .streamlit/secrets.toml (GEMINI_API_KEY).")
+    else:
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        # Renderiza histórico da conversa
+        for msg in st.session_state.chat_history:
+            avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
+            with st.chat_message(msg["role"], avatar=avatar_icon):
+                st.markdown(msg["content"])
+
+        # Caixa de mensagem do usuário
+        if prompt := st.chat_input("Como posso ajudar com o almoxarifado hoje?"):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(prompt)
+
+            try:
+                # Faz a chamada para o modelo atualizado gemini-1.5-flash
+                response = client_gemini.models.generate_content(
+                    model="gemini-1.5-flash",
+                    contents=prompt,
+                )
+
+                resposta = response.text
+                st.session_state.chat_history.append({"role": "assistant", "content": resposta})
+
+                with st.chat_message("assistant", avatar="🦊"):
+                    st.markdown(resposta)
+
+            except Exception as e:
+                st.error(f"Erro ao conversar com a Raposa Assistente: {e}")
