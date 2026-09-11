@@ -201,7 +201,6 @@ def inicializar_banco():
                 status TEXT DEFAULT 'Ativo'
             );
             """)
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS equipe_projeto (
                 id SERIAL PRIMARY KEY,
@@ -210,7 +209,6 @@ def inicializar_banco():
                 funcao TEXT DEFAULT 'Operador'
             );
             """)
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS historico (
                 id SERIAL PRIMARY KEY,
@@ -396,10 +394,12 @@ def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, respon
     tipo_upper = tipo.upper()
     if tipo_upper == "SAÍDA" and qtd_mov > qtd_atual:
         return False, f"Estoque insuficiente! Saldo atual: {qtd_atual:.2f}"
+    
     if tipo_upper in ["ENTRADA", "DEVOLUÇÃO", "DEVOLUCAO"]:
         nova_qtd = qtd_atual + qtd_mov
     else:
         nova_qtd = qtd_atual - qtd_mov
+
     conn = conectar()
     try:
         with conn.cursor() as cursor:
@@ -423,12 +423,16 @@ def estornar_movimentacao(historico_id, usuario_logado):
             res = cursor.fetchone()
             if not res:
                 return False, "Registro de histórico não encontrado."
+            
             prod_id, tipo, quantidade = res
+            
             cursor.execute("SELECT quantidade FROM produtos WHERE id = %s", (prod_id,))
             res_prod = cursor.fetchone()
             if not res_prod:
                 return False, "Produto associado a este histórico não existe mais."
+            
             qtd_atual = res_prod[0]
+            
             if "ENTRADA" in tipo.upper() or "DEVOLUÇÃO" in tipo.upper() or "DEVOLUCAO" in tipo.upper():
                 if qtd_atual < quantidade:
                     return False, f"Não é possível estornar. Saldo atual ({qtd_atual}) é menor que a quantidade do estorno ({quantidade})."
@@ -439,6 +443,7 @@ def estornar_movimentacao(historico_id, usuario_logado):
                 tipo_estorno = f"ESTORNO SAÍDA (ID #{historico_id})"
             else:
                 return False, "Tipo de movimentação não suportado para estorno automático."
+
             cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
             cursor.execute(
                 "INSERT INTO historico (produto_id, tipo, quantidade, usuario, responsavel_epi) VALUES (%s, %s, %s, %s, %s)",
@@ -505,10 +510,12 @@ def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, val
             else:
                 cursor.execute("INSERT INTO produtos (nome, categoria, localizacao, quantidade) VALUES (%s, %s, %s, %s) RETURNING id", (nome_prod.strip(), categoria, localizacao, qtd_mov))
                 prod_id = cursor.fetchone()[0]
+
             cursor.execute("""
             INSERT INTO notas_fiscais (numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, valor_unitario, valor_total, usuario)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, valor_total, usuario_logado))
+
             cursor.execute(
                 "INSERT INTO historico (produto_id, tipo, quantidade, usuario) VALUES (%s, %s, %s, %s)",
                 (prod_id, f"ENTRADA (NF {numero_nf})", qtd_mov, usuario_logado)
@@ -525,14 +532,18 @@ def processar_xml_nfe(xml_file):
         tree = ET.parse(xml_file)
         root = tree.getroot()
         ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'} if 'portalfiscal' in root.tag else {}
+        
         def get_tag(element, path):
             node = element.find(path, ns) if ns else element.find(path)
             return node.text if node is not None else ""
+
         ide = root.find('.//nfe:ide', ns) if ns else root.find('.//ide')
         emit = root.find('.//nfe:emit', ns) if ns else root.find('.//emit')
+        
         numero_nf = get_tag(ide, 'nfe:nNF') if ns else get_tag(ide, 'nNF')
         fornecedor = get_tag(emit, 'nfe:xNome') if ns else get_tag(emit, 'xNome')
         cnpj = get_tag(emit, 'nfe:CNPJ') if ns else get_tag(emit, 'CNPJ')
+        
         itens = []
         det_list = root.findall('.//nfe:det', ns) if ns else root.findall('.//det')
         for det in det_list:
@@ -540,14 +551,17 @@ def processar_xml_nfe(xml_file):
             nome_item = get_tag(prod, 'nfe:xProd') if ns else get_tag(prod, 'xProd')
             raw_qtd = get_tag(prod, 'nfe:qCom') if ns else get_tag(prod, 'qCom')
             raw_unit = get_tag(prod, 'nfe:vUnCom') if ns else get_tag(prod, 'vUnCom')
+            
             qtd_item = float(raw_qtd) if raw_qtd else 0.0
             val_unit = float(raw_unit) if raw_unit else 0.0
+            
             itens.append({
                 "produto": nome_item,
                 "quantidade": qtd_item,
                 "valor_unitario": val_unit,
                 "valor_total": qtd_item * val_unit
             })
+            
         return True, {"numero_nf": numero_nf, "fornecedor": fornecedor, "cnpj": cnpj, "itens": itens}
     except Exception as e:
         return False, f"Erro ao ler arquivo XML: {str(e)}"
@@ -617,6 +631,7 @@ def buscar_historico():
 
 # --- INTERFACE E NAVEGAÇÃO ---
 config = buscar_configuracoes()
+
 st.markdown(f"""
 <style>
 .stButton>button[kind="primary"] {{
@@ -642,6 +657,7 @@ if not st.session_state.logado:
     st.title(f"🏢 {config['nome_empresa']}")
     if config['logo_path'] and os.path.exists(config['logo_path']):
         st.image(config['logo_path'], width=180)
+    
     col1, _ = st.columns([1, 2])
     with col1:
         user_input = st.text_input("👤 Usuário")
@@ -688,6 +704,7 @@ else:
 
 st.sidebar.title(f"🏢 {config['nome_empresa']}")
 st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
+
 if config['logo_path'] and os.path.exists(config['logo_path']):
     st.sidebar.image(config['logo_path'], use_container_width=True)
 
@@ -722,6 +739,7 @@ if "Consulta de Estoque" in opcao:
     if not df_prod.empty:
         df_zerados = df_prod[df_prod['quantidade'] <= 0]
         df_alertas = df_prod[(df_prod['quantidade'] > 0) & (df_prod['quantidade'] <= df_prod['qtd_minima'])]
+        
         if not df_zerados.empty:
             st.error(f"⚠️ **ATENÇÃO:** Existe(m) {len(df_zerados)} produto(s) com **ESTOQUE ZERADO**!")
         if not df_alertas.empty:
@@ -783,6 +801,7 @@ if "Consulta de Estoque" in opcao:
         st.write("---")
         st.subheader("🛠️ Ferramentas Avançadas de Admin (Edição / Mesclagem)")
         tab_editar, tab_mesclar = st.tabs(["✏️ Editar Item do Estoque", "🔀 Mesclar Itens Cadastrados"])
+        
         with tab_editar:
             item_edit_id = st.selectbox("Selecione o Item para Editar:", df_prod['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_prod[df_prod['id']==x]['nome'].values[0]}")
             if item_edit_id:
@@ -800,6 +819,7 @@ if "Consulta de Estoque" in opcao:
                         ed_qtd_cx = st.number_input("Qtd Por Caixa", min_value=1, value=int(prod_row['qtd_por_caixa']))
                         ed_quantidade = st.number_input("Quantidade em Estoque", min_value=0.0, value=float(prod_row['quantidade']), step=1.0)
                         ed_ca = st.text_input("C.A (Se aplicável)", value=str(prod_row['ca']))
+                    
                     if st.form_submit_button("💾 Salvar Alterações"):
                         ok, msg = editar_produto(item_edit_id, ed_nome, ed_categoria, ed_localizacao, ed_quantidade, ed_unidade, ed_qtd_cx, prod_row['foto_path'], ed_cod_barras, ed_ca, ed_qtd_minima)
                         if ok:
@@ -807,11 +827,13 @@ if "Consulta de Estoque" in opcao:
                             st.rerun()
                         else:
                             st.error(msg)
+                            
         with tab_mesclar:
             st.caption("Junte o estoque e o histórico de dois ou mais registros idênticos em um único cadastro.")
             prod_destino_id = st.selectbox("Selecione o Produto DESTINO (Que será MANTIDO):", df_prod['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_prod[df_prod['id']==x]['nome'].values[0]}")
             outros_prods = df_prod[df_prod['id'] != prod_destino_id]
             prods_origem_ids = st.multiselect("Selecione o(s) Produto(s) ORIGEM (Serão SOMADOS e EXCLUÍDOS):", outros_prods['id'].tolist(), format_func=lambda x: f"ID #{x} - {outros_prods[outros_prods['id']==x]['nome'].values[0]}")
+            
             if st.button("🔀 Confirmar Mesclagem de Itens", type="primary"):
                 if prods_origem_ids:
                     ok, msg = mesclar_produtos(prod_destino_id, prods_origem_ids)
@@ -827,6 +849,7 @@ if "Consulta de Estoque" in opcao:
 elif "Pedidos de Compras" in opcao:
     st.title("🛒 Gerador de Pedidos de Compras & Itens Faltantes")
     st.caption("Esta aba monitora automaticamente os produtos com estoque zerado ou abaixo do limite mínimo cadastrado.")
+    
     df_prod = buscar_produtos()
     if df_prod.empty:
         st.info("Nenhum produto cadastrado.")
@@ -837,6 +860,7 @@ elif "Pedidos de Compras" in opcao:
         else:
             df_faltantes['Status'] = df_faltantes['quantidade'].apply(lambda x: "ZERADO" if x <= 0 else "REPOR")
             df_faltantes['Qtd a Comprar (Sugestão)'] = df_faltantes.apply(lambda x: max(0.0, float(x['qtd_minima']) - float(x['quantidade'])), axis=1)
+            
             c_kpi1, c_kpi2, c_kpi3 = st.columns(3)
             with c_kpi1:
                 st.metric("Total de Itens p/ Reposição", len(df_faltantes))
@@ -844,10 +868,12 @@ elif "Pedidos de Compras" in opcao:
                 st.metric("Itens Totalmente Zerados", len(df_faltantes[df_faltantes['quantidade'] <= 0]))
             with c_kpi3:
                 st.metric("Itens em Nível Crítico", len(df_faltantes[df_faltantes['quantidade'] > 0]))
+                
             st.write("---")
             st.subheader("📋 Lista para Solicitação de Compras")
             cols_pedidos = ['id', 'nome', 'categoria', 'localizacao', 'quantidade', 'qtd_minima', 'Qtd a Comprar (Sugestão)', 'unidade_medida', 'Status']
             st.dataframe(df_faltantes[cols_pedidos], use_container_width=True)
+            
             st.write("---")
             st.subheader("📥 Gerar Pedido / Exportar para o Setor de Compras")
             items_selecionados = st.multiselect(
@@ -856,6 +882,7 @@ elif "Pedidos de Compras" in opcao:
                 default=df_faltantes['id'].tolist(),
                 format_func=lambda x: f"{df_faltantes[df_faltantes['id']==x]['nome'].values[0]} (Qtd Atual: {df_faltantes[df_faltantes['id']==x]['quantidade'].values[0]} | Comprar: {df_faltantes[df_faltantes['id']==x]['Qtd a Comprar (Sugestão)'].values[0]})"
             )
+            
             if items_selecionados:
                 df_export_pedidos = df_faltantes[df_faltantes['id'].isin(items_selecionados)][cols_pedidos]
                 st.download_button(
@@ -924,6 +951,7 @@ elif "Gestão de Projetos" in opcao:
 elif "Checklist de Ferramentas" in opcao:
     st.title("📋 Checklist de Ferramentas e Equipamentos")
     st.caption("Realize a conferência das ferramentas. Os EPIs e insumos de consumo não aparecem nesta tela.")
+    
     df_prod = buscar_produtos()
     if not df_prod.empty:
         filtro_incluir = df_prod['categoria'].str.contains("Ferramenta|Equipamento", case=False, na=False)
@@ -931,6 +959,7 @@ elif "Checklist de Ferramentas" in opcao:
         df_ferramentas = df_prod[filtro_incluir & filtro_excluir_epi]
     else:
         df_ferramentas = pd.DataFrame()
+
     if df_ferramentas.empty:
         st.warning("Nenhuma ferramenta/equipamento cadastrado.")
     else:
@@ -945,9 +974,11 @@ elif "Checklist de Ferramentas" in opcao:
                 with c2:
                     obs_item = st.text_input(f"Observações - {row['nome']}", key=f"obs_{row['id']}", placeholder="Detalhes de danos/avarias...")
                 itens_checklist.append({"ferramenta": row['nome'], "status": status, "obs": obs_item})
+            
             st.write("---")
             obs_gerais = st.text_area("✍️ Observações Gerais da Inspeção:", placeholder="Informe detalhes do estado do carrinho, maletas, etc.")
             btn_gerar_chk = st.form_submit_button("📄 Finalizar Checklist e Gerar PDF", type="primary")
+            
             if btn_gerar_chk:
                 try:
                     path_pdf = gerar_pdf_checklist("Checklist Diário", st.session_state.usuario, itens_checklist, obs_gerais)
@@ -969,16 +1000,18 @@ elif "Retirada / Devolução" in opcao:
     df_prod = buscar_produtos()
     df_proj = buscar_projetos()
     df_eq = buscar_equipe_projeto()
-
+    
     if df_prod.empty:
         st.info("Nenhum produto cadastrado.")
     else:
         st.subheader("1. Tipo de Operação")
         tipo_operacao = st.radio("Selecione a Ação:", ["📤 Retirada (Saída)", "📥 Devolução (Entrada/Reinserção)"], horizontal=True)
         tipo_mov_banco = "SAÍDA" if "Retirada" in tipo_operacao else "DEVOLUÇÃO"
+        
         st.write("---")
         st.subheader("2. Selecionar Produto")
         cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:", key="retirada_cod_bipado")
+        
         prod_selecionado = None
         if cod_bipado.strip():
             match = df_prod[df_prod['codigo_barras'].astype(str) == cod_bipado.strip()]
@@ -987,12 +1020,16 @@ elif "Retirada / Devolução" in opcao:
                 st.success(f"Item Encontrado: **{prod_selecionado}**")
             else:
                 st.warning("Código de barras não encontrado no cadastro.")
+                
         if not prod_selecionado:
             prod_selecionado = st.selectbox("Ou Escolha o Item na Lista:", df_prod['nome'].tolist(), key="retirada_select_item")
+            
         row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
+        
         st.write("---")
         st.subheader(f"3. Dados para {tipo_operacao}")
         col1, col2 = st.columns(2)
+        
         with col1:
             st.info(f"📦 **Item:** {row['nome']} \n\n🏷️ **Categoria:** {row['categoria']} \n\n📊 **Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
             modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key="retirada_modo_medida")
@@ -1030,6 +1067,7 @@ elif "Retirada / Devolução" in opcao:
 
         st.write("---")
         btn_label = "📤 Confirmar Retirada de Item" if tipo_mov_banco == "SAÍDA" else "📥 Confirmar Devolução e Recompor Estoque"
+        
         if st.button(btn_label, type="primary"):
             if tipo_mov_banco == "SAÍDA" and not nome_retirou.strip():
                 st.error("❌ Por favor, informe o **Nome de quem retirou** o material!")
@@ -1075,6 +1113,7 @@ elif "Cadastrar Produto" in opcao:
                 qtd_por_caixa = st.number_input("📦 Qtd de Itens dentro da Caixa", min_value=1, value=1)
             quantidade = st.number_input("📊 Quantidade Inicial em Estoque", min_value=0.0, step=1.0, value=0.0)
             foto = st.file_uploader("🖼️ Foto do Produto (Opcional)", type=["jpg", "png", "jpeg"])
+            
         sub = st.form_submit_button("➕ Cadastrar Produto")
         if sub:
             if nome.strip():
@@ -1094,6 +1133,7 @@ elif "Cadastrar Produto" in opcao:
 elif "Entrada de NF" in opcao:
     st.title("📑 Recebimento e Entrada por Nota Fiscal")
     aba_xml, aba_manual = st.tabs(["📂 Importar Arquivo XML (Automático)", "✍️ Lançamento Manual"])
+    
     with aba_xml:
         uploaded_xml = st.file_uploader("Arraste ou selecione o arquivo .xml da Nota Fiscal:", type=["xml"])
         if uploaded_xml is not None:
@@ -1101,9 +1141,11 @@ elif "Entrada de NF" in opcao:
             if sucesso:
                 st.success(f"✅ XML lido com sucesso! Nota Fiscal **{dados_nfe['numero_nf']}**")
                 st.write(f"🏢 **Fornecedor:** {dados_nfe['fornecedor']} | **CNPJ:** {dados_nfe['cnpj']}")
+                
                 st.subheader("Selecione os itens que deseja cadastrar/atualizar no estoque:")
                 df_itens = pd.DataFrame(dados_nfe['itens'])
                 df_itens.insert(0, "Selecionar", True)
+                
                 df_itens_editado = st.data_editor(
                     df_itens,
                     column_config={"Selecionar": st.column_config.CheckboxColumn("Cadastrar?", default=True)},
@@ -1111,6 +1153,7 @@ elif "Entrada de NF" in opcao:
                     hide_index=True,
                     use_container_width=True
                 )
+                
                 if st.button("🚀 Confirmar e Dar Entrada Automática nos Itens Selecionados", type="primary"):
                     itens_selecionados = df_itens_editado[df_itens_editado["Selecionar"] == True]
                     if itens_selecionados.empty:
@@ -1132,6 +1175,7 @@ elif "Entrada de NF" in opcao:
                                 count_sucesso += 1
                             else:
                                 erros.append(f"Erro no item {item['produto']}: {msg}")
+                        
                         if count_sucesso > 0:
                             st.success(f"✅ Entrada concluída! {count_sucesso} itens selecionados foram atualizados/cadastrados.")
                         if erros:
@@ -1140,6 +1184,7 @@ elif "Entrada de NF" in opcao:
                         st.rerun()
             else:
                 st.error(dados_nfe)
+
     with aba_manual:
         with st.form("form_nf_manual", clear_on_submit=True):
             c1, c2 = st.columns(2)
@@ -1152,6 +1197,7 @@ elif "Entrada de NF" in opcao:
                 qtd_nf = st.number_input("📊 Quantidade Recebida", min_value=0.1, step=1.0)
                 val_unit = st.number_input("💵 Valor Unitário (R$)", min_value=0.0, step=0.01, format="%.2f")
                 st.write(f"💰 **Valor Total Estimado:** R$ {qtd_nf * val_unit:.2f}")
+                
             if st.form_submit_button("💾 Salvar e Dar Entrada"):
                 if num_nf and fornecedor and nome_prod:
                     ok, msg = dar_entrada_nota_fiscal(num_nf, fornecedor, cnpj, nome_prod, float(qtd_nf), float(val_unit), st.session_state.usuario)
@@ -1174,10 +1220,12 @@ elif "Consultar NFs" in opcao:
             busca_nf = st.text_input("Buscar por Número da NF ou Fornecedor:")
         with c2:
             busca_prod_nf = st.text_input("Buscar por Produto na NF:")
+            
         if busca_nf:
             df_nf = df_nf[df_nf['numero_nf'].astype(str).str.contains(busca_nf, case=False, na=False) | df_nf['fornecedor'].str.contains(busca_nf, case=False, na=False)]
         if busca_prod_nf:
             df_nf = df_nf[df_nf['produto_nome'].str.contains(busca_prod_nf, case=False, na=False)]
+            
         col_t, col_e = st.columns([4, 1])
         with col_t:
             st.dataframe(df_nf, use_container_width=True)
@@ -1193,6 +1241,7 @@ elif "Consultar NFs" in opcao:
 elif "Importar Dados" in opcao:
     st.title("📥 Importação em Lote de Produtos")
     tab_excel, tab_sheets = st.tabs(["📊 Importar de Planilha Excel (.xlsx)", "🌐 Importar de Google Sheets"])
+    
     with tab_excel:
         file_excel = st.file_uploader("Selecione o arquivo .xlsx:", type=["xlsx", "xls"])
         if file_excel is not None:
@@ -1224,6 +1273,7 @@ elif "Importar Dados" in opcao:
                     st.rerun()
             except Exception as e:
                 st.error(f"Erro ao ler arquivo Excel: {e}")
+
     with tab_sheets:
         sheet_id = st.text_input("🆔 ID da Planilha do Google Sheets:")
         if sheet_id:
@@ -1305,17 +1355,21 @@ elif "Dashboard Analytics" in opcao:
     if not df_nf.empty:
         df_nf['data_recebimento'] = pd.to_datetime(df_nf['data_recebimento'])
         tab_periodo, tab_comparativo = st.tabs(["📅 Gastos em Período Específico", "📈 Comparativo entre Períodos / 12 Meses"])
+        
         with tab_periodo:
             col_d1, col_d2 = st.columns(2)
             with col_d1:
                 data_inicio = st.date_input("Data Inicial:", df_nf['data_recebimento'].min().date())
             with col_d2:
                 data_fim = st.date_input("Data Final:", df_nf['data_recebimento'].max().date())
+            
             mask = (df_nf['data_recebimento'].dt.date >= data_inicio) & (df_nf['data_recebimento'].dt.date <= data_fim)
             df_filtrado = df_nf[mask]
             valor_total_gastos = df_filtrado['valor_total'].sum()
+            
             st.metric("Total Gasto no Período Selecionado", f"R$ {valor_total_gastos:,.2f}")
             st.dataframe(df_filtrado[['numero_nf', 'fornecedor', 'produto_nome', 'quantidade', 'valor_unitario', 'valor_total', 'data_recebimento']], use_container_width=True)
+
         with tab_comparativo:
             modo_comp = st.radio("Selecione o Tipo de Comparação:", ["Últimos 12 Meses", "Comparar Dois Períodos Customizados"], horizontal=True)
             if modo_comp == "Últimos 12 Meses":
@@ -1331,14 +1385,17 @@ elif "Dashboard Analytics" in opcao:
                     p1_ini = st.date_input("Início Período A", df_nf['data_recebimento'].min().date(), key="p1_ini")
                 with ca2:
                     p1_fim = st.date_input("Fim Período A", df_nf['data_recebimento'].max().date(), key="p1_fim")
+                
                 st.write("**Período B:**")
                 cb1, cb2 = st.columns(2)
                 with cb1:
                     p2_ini = st.date_input("Início Período B", df_nf['data_recebimento'].min().date(), key="p2_ini")
                 with cb2:
                     p2_fim = st.date_input("Fim Período B", df_nf['data_recebimento'].max().date(), key="p2_fim")
+                    
                 gasto_a = df_nf[(df_nf['data_recebimento'].dt.date >= p1_ini) & (df_nf['data_recebimento'].dt.date <= p1_fim)]['valor_total'].sum()
                 gasto_b = df_nf[(df_nf['data_recebimento'].dt.date >= p2_ini) & (df_nf['data_recebimento'].dt.date <= p2_fim)]['valor_total'].sum()
+                
                 col_mc1, col_mc2 = st.columns(2)
                 col_mc1.metric("Gasto Período A", f"R$ {gasto_a:,.2f}")
                 col_mc2.metric("Gasto Período B", f"R$ {gasto_b:,.2f}", delta=f"R$ {gasto_b - gasto_a:,.2f}", delta_color="inverse")
@@ -1349,10 +1406,10 @@ elif "Dashboard Analytics" in opcao:
 elif "Histórico / Auditoria" in opcao:
     st.title("📜 Histórico e Auditoria de Movimentações (Retenção 18 Meses)")
     df_hist = buscar_historico()
-    c1, c2 = st.columns([4, 1])
-    with c1:
+    col_h1, col_h2 = st.columns([4, 1])
+    with col_h1:
         st.dataframe(df_hist, use_container_width=True)
-    with c2:
+    with col_h2:
         if not df_hist.empty:
             st.download_button(
                 label="📊 Exportar Excel",
@@ -1360,6 +1417,7 @@ elif "Histórico / Auditoria" in opcao:
                 file_name="historico_movimentacoes.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
     st.write("---")
     st.subheader("↩️ Estorno / Correção dos Últimos Registros")
     if not df_hist.empty:
@@ -1387,6 +1445,7 @@ elif "Gerenciar Usuários" in opcao and st.session_state.perfil == "Admin":
     df_usr = buscar_usuarios()
     st.subheader("🌐 Status dos Usuários Online e Atividades")
     st.dataframe(df_usr[['id', 'usuario', 'perfil', 'status_online', 'ultima_atividade', 'localizacao_sessao', 'acao_atual']], use_container_width=True)
+    
     st.write("---")
     st.subheader("✏️ Editar Usuário / Redefinir Senha")
     user_edit_id = st.selectbox("Selecione o Usuário para Editar:", df_usr['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_usr[df_usr['id']==x]['usuario'].values[0]}")
@@ -1396,6 +1455,7 @@ elif "Gerenciar Usuários" in opcao and st.session_state.perfil == "Admin":
             ed_u_nome = st.text_input("👤 Nome do Usuário", value=usr_row['usuario'])
             ed_u_perfil = st.selectbox("🛡️ Perfil de Acesso", ["Operador", "Admin"], index=["Operador", "Admin"].index(usr_row['perfil']))
             ed_u_senha = st.text_input("🔑 Nova Senha (Deixe em branco para manter a senha atual)", type="password")
+            
             if st.form_submit_button("💾 Salvar Alterações no Usuário"):
                 ok, msg = editar_usuario(user_edit_id, ed_u_nome, ed_u_perfil, ed_u_senha)
                 if ok:
@@ -1403,12 +1463,14 @@ elif "Gerenciar Usuários" in opcao and st.session_state.perfil == "Admin":
                     st.rerun()
                 else:
                     st.error(msg)
+
     st.write("---")
     st.subheader("➕ Cadastrar Novo Usuário")
     with st.form("form_cad_usr", clear_on_submit=True):
         u_nome = st.text_input("👤 Nome do Usuário")
         u_senha = st.text_input("🔑 Senha", type="password")
         u_perfil = st.selectbox("🛡️ Perfil de Acesso", ["Operador", "Admin"])
+        
         if st.form_submit_button("➕ Cadastrar Usuário"):
             ok, msg = cadastrar_usuario(u_nome, u_senha, u_perfil)
             if ok:
@@ -1425,6 +1487,7 @@ elif "Personalizar Empresa" in opcao and st.session_state.perfil == "Admin":
         e_cor = st.color_picker("🎨 Cor do Tema", value=config['cor_tema'])
         e_logo = st.file_uploader("🖼️ Atualizar Logomarca (Imagem)", type=["png", "jpg", "jpeg"])
         e_mapa = st.file_uploader("🗺️ Atualizar Mapa do Almoxarifado (PDF ou Imagem)", type=["pdf", "png", "jpg", "jpeg"])
+        
         if st.form_submit_button("💾 Salvar Configurações"):
             logo_p = config['logo_path']
             mapa_p = config['mapa_path']
@@ -1432,6 +1495,7 @@ elif "Personalizar Empresa" in opcao and st.session_state.perfil == "Admin":
                 logo_p = salvar_arquivo_seguro(e_logo, tipo="imagem")
             if e_mapa is not None:
                 mapa_p = salvar_arquivo_seguro(e_mapa, tipo="mapa")
+                
             ok, msg = salvar_configuracoes(e_nome, logo_p, e_cor, mapa_p)
             if ok:
                 st.success(msg)
@@ -1449,16 +1513,16 @@ elif "Fox Assistente" in opcao:
     else:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
-
+            
         # BUSCAR CONTEXTO ATUAL DO BANCO PARA O ASSISTENTE LER PREÇOS E TABELAS
         df_p_ctx = buscar_produtos()
         df_nf_ctx = buscar_notas_fiscais()
         df_hist_ctx = buscar_historico()
-
+        
         resumo_produtos = df_p_ctx[['nome', 'quantidade', 'unidade_medida', 'localizacao']].to_string(index=False) if not df_p_ctx.empty else "Nenhum produto"
         resumo_precos = df_nf_ctx[['produto_nome', 'fornecedor', 'valor_unitario', 'valor_total', 'data_recebimento']].head(20).to_string(index=False) if not df_nf_ctx.empty else "Nenhuma nota fiscal"
         resumo_saidas = df_hist_ctx[['produto', 'quantidade', 'nome_retirou', 'projeto_nome', 'data_hora']].head(20).to_string(index=False) if not df_hist_ctx.empty else "Nenhum histórico"
-
+        
         FOX_SYSTEM_INSTRUCTION_DINAMICO = f"""
 Você é a Fox Assistente, a inteligência virtual simpática e especialista do Sistema de Almoxarifado! 🦊✨
 
@@ -1473,7 +1537,9 @@ Você é a Fox Assistente, a inteligência virtual simpática e especialista do 
 8. **Histórico e Retenção:** Guarda histórico completo com limpeza automática de registros superiores a 18 meses.
 
 ---
+
 ### TABELAS E DADOS EM TEMPO REAL DO ALMOXARIFADO (USE PARA COMPARAR PREÇOS E DAR SUGESTÕES DE BI):
+
 **1. TABELA DE PRODUTOS E ESTOQUE:**
 {resumo_produtos}
 
@@ -1482,7 +1548,9 @@ Você é a Fox Assistente, a inteligência virtual simpática e especialista do 
 
 **3. ÚLTIMAS RETIRADAS E PROJETOS:**
 {resumo_saidas}
+
 ---
+
 Sua missão:
 - Responder às dúvidas dos usuários com clareza e empatia.
 - Ler os dados de preços fornecidos acima para fazer comparativos de custos e sugerir economias.
@@ -1498,14 +1566,16 @@ Sua missão:
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
                 st.markdown(prompt)
+                
             try:
                 conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION_DINAMICO}\n\nPergunta do usuário: {prompt}"
                 
-                # MODELO CORRIGIDO PARA GEMINI 2.5 FLASH
+                # MODELO ATUALIZADO E OFICIAL DA API
                 response = client_gemini.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=conteudo_envio,
                 )
+                
                 resposta = response.text
                 st.session_state.chat_history.append({"role": "assistant", "content": resposta})
                 with st.chat_message("assistant", avatar="🦊"):
