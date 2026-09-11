@@ -1570,9 +1570,9 @@ Sua missão:
             try:
                 conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION_DINAMICO}\n\nPergunta do usuário: {prompt}"
                 
-                # MODELO ATUALIZADO E OFICIAL DA API
+                # MODELO ATUALIZADO SOLICITADO PELA API
                 response = client_gemini.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.6-flash",
                     contents=conteudo_envio,
                 )
                 
