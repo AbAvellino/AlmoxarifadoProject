@@ -170,6 +170,7 @@ SUPABASE_DB_URL = st.secrets.get(
     "SUPABASE_DB_URL",
     "postgresql://postgres:SUA_SENHA@db.SEU_PROJETO.supabase.co:6543/postgres"
 )
+
 @st.cache_resource
 def obter_conexao():
     return psycopg2.connect(SUPABASE_DB_URL)
@@ -953,7 +954,6 @@ elif "Retirada / Devolução" in opcao:
                 ok, msg = movimentar_produto(int(row['id']), tipo_mov_banco, float(qtd_mov_final), float(row['quantidade']), st.session_state.usuario, responsavel_epi)
                 if ok:
                     st.success(f"✅ Operação realizada com sucesso! {msg}")
-                    # CORREÇÃO APLICADA AQUI: Remoção limpa das chaves no session_state para resetar o form sem erro
                     if "retirada_cod_bipado" in st.session_state:
                         del st.session_state["retirada_cod_bipado"]
                     if "retirada_resp_epi" in st.session_state:
@@ -1362,7 +1362,7 @@ elif "Fox Assistente" in opcao:
                 conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION}\n\nPergunta do usuário: {prompt}"
                 
                 response = client_gemini.models.generate_content(
-                    model="gemini-3.6-flash",
+                    model="gemini-2.5-flash",
                     contents=conteudo_envio,
                 )
                 resposta = response.text
