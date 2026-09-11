@@ -28,7 +28,7 @@ hide_streamlit_style = """
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# Pastas para salvamento temporário e relatórios
+# Pastas para salvamento temporário e relatorios
 for pasta in ["uploads", "relatorios_checklist"]:
     if not os.path.exists(pasta):
         os.makedirs(pasta)
@@ -46,42 +46,25 @@ client_gemini = init_gemini()
 # --- PROMPT DE INSTRUÇÃO DO SISTEMA PARA O FOX ASSISTENTE ---
 FOX_SYSTEM_INSTRUCTION = """
 Você é a Fox Assistente, uma assistente virtual super simpática, amigável, clara e prestativa integrada ao Sistema de Almoxarifado Inteligente! 🦊✨
-
 Seu objetivo principal é acolher os usuários (especialmente novos usuários) e apresentar o sistema de forma simples, direta e didática.
-
 Sempre que perguntarem o que o sistema faz, como funciona ou pedirem um tutorial/ajuda, apresente o mini tutorial a seguir, explicando cada menu e suas funcionalidades com uma linguagem bem leve e acolhedora:
-
 ---
 👋 **Olá! Seja muito bem-vindo(a) ao Nosso Sistema de Almoxarifado!** 🦊
 Eu sou a **Fox Assistente** e vou te ensinar rapidinho tudo o que você pode fazer por aqui:
-
 📦 **1. Consulta de Estoque:** Veja todos os produtos cadastrados, pesquise por nome, setor ou bipe o código de barras. Se o estoque estiver baixo ou zerado, o sistema avisa na hora!
-
 🛒 **2. Pedidos de Compras (Itens Faltantes):** O sistema monitora sozinho os itens zerados ou no nível crítico e gera uma lista pronta em Excel para o setor de compras.
-
 📋 **3. Checklist de Ferramentas:** Faça a conferência diária de ferramentas e equipamentos com poucos cliques e gere relatórios profissionais em PDF.
-
 🔄 **4. Retirada / Devolução de Materiais:** Registre saídas e devoluções de materiais, caixas ou EPIs vinculados diretamente ao colaborador.
-
 ➕ **5. Cadastrar Produto:** Adicione novos itens ao estoque informando quantidade inicial, setor, código de barras, CA (para EPIs) e imagem.
-
 📑 **6. Entrada de NF (XML Auto):** Dê entrada em notas fiscais de forma automática apenas subindo o arquivo XML da NFe ou fazendo lançamentos manuais.
-
 🧾 **7. Consultar NFs Subidas:** Consulte todas as notas fiscais que já foram registradas e exporte os relatórios.
-
 📥 **8. Importar Dados (Excel / Sheets):** Cadastre centenas de produtos de uma só vez importando planilhas do Excel ou do Google Sheets.
-
 📊 **9. Dashboard Analytics (BI):** Acompanhe gráficos, total gasto em compras por período, comparativos mensais e o top 10 de itens mais retirados.
-
 📜 **10. Histórico / Auditoria:** Veja tudo o que aconteceu no sistema e estorne movimentações feitas por engano com total segurança.
-
 👥 **11. Gerenciar Usuários (Admin):** Controle quem tem acesso ao sistema (Admin ou Operador) e veja quem está online.
-
 🎨 **12. Personalizar Empresa (Admin):** Altere a cor do tema, o nome da empresa, a logo e o mapa/layout do almoxarifado.
-
 💬 **13. Fox Assistente (Eu!):** Estou sempre por aqui para tirar suas dúvidas, te dar dicas de organização ou ajudar com o que você precisar!
 ---
-
 Mantenha sempre um tom prestativo, amigável, use emojis e responda a qualquer outra dúvida sobre o uso do sistema!
 """
 
@@ -187,7 +170,6 @@ SUPABASE_DB_URL = st.secrets.get(
     "SUPABASE_DB_URL",
     "postgresql://postgres:SUA_SENHA@db.SEU_PROJETO.supabase.co:6543/postgres"
 )
-
 @st.cache_resource
 def obter_conexao():
     return psycopg2.connect(SUPABASE_DB_URL)
@@ -679,7 +661,6 @@ st.sidebar.title(f"🏢 {config['nome_empresa']}")
 st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
 if config['logo_path'] and os.path.exists(config['logo_path']):
     st.sidebar.image(config['logo_path'], use_container_width=True)
-
 if config['mapa_path'] and os.path.exists(config['mapa_path']):
     st.sidebar.write("---")
     st.sidebar.subheader("🗺️ Layout/Mapa")
@@ -917,7 +898,7 @@ elif "Checklist de Ferramentas" in opcao:
         else:
             st.info("Nenhum relatório PDF disponível no momento.")
 
-# --- ABA 3: RETIRADA E DEVOLUÇÃO DE MATERIAIS ---
+# --- ABA 3: RETIRADA E DEVOLUÇÃO DE MATERIAIS (SEÇÃO CORRIGIDA) ---
 elif "Retirada / Devolução" in opcao:
     st.title("🔄 Retirada / Devolução de Materiais")
     df_prod = buscar_produtos()
@@ -972,10 +953,11 @@ elif "Retirada / Devolução" in opcao:
                 ok, msg = movimentar_produto(int(row['id']), tipo_mov_banco, float(qtd_mov_final), float(row['quantidade']), st.session_state.usuario, responsavel_epi)
                 if ok:
                     st.success(f"✅ Operação realizada com sucesso! {msg}")
+                    # CORREÇÃO APLICADA AQUI: Remoção limpa das chaves no session_state para resetar o form sem erro
                     if "retirada_cod_bipado" in st.session_state:
-                        st.session_state.retirada_cod_bipado = ""
+                        del st.session_state["retirada_cod_bipado"]
                     if "retirada_resp_epi" in st.session_state:
-                        st.session_state.retirada_resp_epi = ""
+                        del st.session_state["retirada_resp_epi"]
                     st.rerun()
                 else:
                     st.error(msg)
@@ -1361,24 +1343,20 @@ elif "Personalizar Empresa" in opcao and st.session_state.perfil == "Admin":
 elif "Fox Assistente" in opcao:
     st.title("🦊 Fox Assistente - Almoxarifado Inteligente")
     st.caption("Sua companheira ágil e astuta para tirar dúvidas, explicar o sistema e dar dicas de organização!")
-
     if not client_gemini:
         st.error("Chave de API do Gemini não configurada em .streamlit/secrets.toml (GEMINI_API_KEY).")
     else:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
-
         # Exibir histórico de conversas na tela
         for msg in st.session_state.chat_history:
             avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
             with st.chat_message(msg["role"], avatar=avatar_icon):
                 st.markdown(msg["content"])
-
         if prompt := st.chat_input("Como posso te ajudar no almoxarifado hoje? (Ex: Como funciona o sistema?)"):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
                 st.markdown(prompt)
-
             try:
                 # Montagem do contexto incluindo a instrução de sistema
                 conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION}\n\nPergunta do usuário: {prompt}"
