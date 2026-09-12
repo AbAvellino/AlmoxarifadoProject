@@ -17,13 +17,13 @@ import streamlit as st
 # Configuração da página Streamlit
 st.set_page_config(page_title="Sistema de Almoxarifado Inteligente", layout="wide", page_icon="🦊")
 
-# --- CSS PARA OCULTAR ELEMENTOS PADRÃO DO STREAMLIT ---
+# --- CSS AJUSTADO: PERMITE REABRIR O MENU LATERAL SE OCURTADO ---
 hide_streamlit_style = """
     <style>
     #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
     footer {visibility: hidden;}
-    .stAppHeader {display: none;}
+    /* Mantém o botão de expansão da sidebar visível no header */
+    [data-testid="stSidebarNav"] {margin-top: 0px;}
     </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
@@ -78,7 +78,6 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
         permitidas = EXTENSOES_PERMITIDAS_PDF
     else:
         permitidas = EXTENSOES_PERMITIDAS_IMAGEM
-
     if ext not in permitidas:
         raise ValueError(f"Extensão não permitida: {ext}")
     novo_nome = f"{uuid.uuid4().hex}{ext}"
@@ -228,7 +227,6 @@ def inicializar_banco():
                 data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS biblioteca_projetos (
                 id SERIAL PRIMARY KEY,
@@ -247,7 +245,6 @@ def inicializar_banco():
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS projeto_nome TEXT DEFAULT '';")
             except Exception:
                 pass
-
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -791,8 +788,10 @@ else:
 
 st.sidebar.title(f"🏢 {config['nome_empresa']}")
 st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
+
 if config['logo_path'] and os.path.exists(config['logo_path']):
     st.sidebar.image(config['logo_path'], use_container_width=True)
+
 if config['mapa_path'] and os.path.exists(config['mapa_path']):
     st.sidebar.write("---")
     st.sidebar.subheader("🗺️ Layout/Mapa")
@@ -835,17 +834,28 @@ if "Consulta de Estoque" in opcao:
     if not df_prod.empty:
         df_prod['Status'] = df_prod.apply(lambda x: "ZERADO" if x['quantidade'] <= 0 else ("REPOR" if x['quantidade'] <= x['qtd_minima'] else "OK"), axis=1)
         
+        # --- LÓGICA ATUALIZADA DE DIFERENCIAÇÃO DE UNIDADES/EMBALAGENS ---
         def formatar_saldo(row):
             medida = row['unidade_medida']
+            fator = row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 1
+            qtd = row['quantidade']
+            
             if medida == 'Caixa':
-                qtd_cx = row['quantidade'] / row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 0
-                return f"{row['quantidade']:.0f} un ({qtd_cx:.2f} CX)"
-            elif medida == 'Metro':
-                return f"{row['quantidade']:.2f} Mts"
+                qtd_cx = qtd / fator
+                return f"{qtd:.0f} un ({qtd_cx:.2f} CX)"
             elif medida == 'Pacote':
-                return f"{row['quantidade']:.0f} Pacotes"
-            else:
-                return f"{row['quantidade']:.0f} Unidades"
+                qtd_pacote = qtd / fator
+                return f"{qtd:.0f} un ({qtd_pacote:.2f} Pacotes)"
+            elif medida == 'Metro':
+                if fator > 1:
+                    qtd_rolos = qtd / fator
+                    return f"{qtd:.2f} Mts (~{qtd_rolos:.2f} Rolos de {fator}m)"
+                return f"{qtd:.2f} Mts"
+            elif medida == 'Rolo':
+                total_mts = qtd * fator if fator > 1 else qtd
+                return f"{qtd:.0f} Rolos ({total_mts:.2f} Mts)"
+            else: # Unidade
+                return f"{qtd:.0f} Unidades"
                 
         df_prod['Saldo Formatado'] = df_prod.apply(formatar_saldo, axis=1)
     else:
@@ -881,6 +891,7 @@ if "Consulta de Estoque" in opcao:
                 file_name="estoque_atual.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+            
     if st.session_state.perfil == "Admin" and not df_prod.empty:
         st.write("---")
         st.subheader("🛠️ Ferramentas Avançadas de Admin (Edição / Mesclagem)")
@@ -899,8 +910,8 @@ if "Consulta de Estoque" in opcao:
                         ed_cod_barras = st.text_input("Código de Barras", value=str(prod_row['codigo_barras']))
                         ed_qtd_minima = st.number_input("Quantidade Mínima (Aviso de Compras)", min_value=0.0, value=float(prod_row.get('qtd_minima', 5.0)), step=1.0)
                     with ed_c2:
-                        ed_unidade = st.selectbox("Unidade de Medida", ["Caixa", "Metro", "Pacote", "Unidade"], index=["Caixa", "Metro", "Pacote", "Unidade"].index(prod_row['unidade_medida']) if prod_row['unidade_medida'] in ["Caixa", "Metro", "Pacote", "Unidade"] else 0)
-                        ed_qtd_cx = st.number_input("Qtd Por Caixa", min_value=1, value=int(prod_row['qtd_por_caixa']))
+                        ed_unidade = st.selectbox("Unidade de Medida", ["Unidade", "Caixa", "Pacote", "Metro", "Rolo"], index=["Unidade", "Caixa", "Pacote", "Metro", "Rolo"].index(prod_row['unidade_medida']) if prod_row['unidade_medida'] in ["Unidade", "Caixa", "Pacote", "Metro", "Rolo"] else 0)
+                        ed_qtd_cx = st.number_input("Qtd de Itens por Embalagem / Tamanho do Rolo (m)", min_value=1, value=int(prod_row['qtd_por_caixa']))
                         ed_quantidade = st.number_input("Quantidade em Estoque", min_value=0.0, value=float(prod_row['quantidade']), step=1.0)
                         ed_ca = st.text_input("C.A (Se aplicável)", value=str(prod_row['ca']))
                     
@@ -1006,7 +1017,6 @@ elif "Gestão de Projetos" in opcao:
         st.write("---")
         st.subheader("📋 Lista de Projetos Registrados")
         st.dataframe(df_proj, use_container_width=True)
-
     with tab_eq:
         st.subheader("👤 Adicionar Colaborador ao Projeto")
         if df_proj.empty:
@@ -1035,12 +1045,9 @@ elif "Gestão de Projetos" in opcao:
 elif "Biblioteca de Desenhos" in opcao:
     st.title("📁 Biblioteca de Desenhos e Projetos (PDF)")
     st.caption("Anexe e gerencie plantas, desenhos técnicos e documentos em PDF associados aos projetos.")
-
     df_bib = buscar_biblioteca_projetos()
     df_proj = buscar_projetos()
-
     tab_consultar, tab_anexar = st.tabs(["🔍 Consultar / Gerenciar Desenhos", "➕ Anexar Novo Desenho / Projeto (PDF)"])
-
     with tab_consultar:
         if df_bib.empty:
             st.info("Nenhum desenho ou projeto em PDF foi anexado até o momento.")
@@ -1051,7 +1058,6 @@ elif "Biblioteca de Desenhos" in opcao:
             with col_f2:
                 lista_proj_filtro = ["Todos os Projetos"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
                 filtro_proj_pdf = st.selectbox("📌 Filtrar por Projeto:", lista_proj_filtro)
-
             df_exibir_pdf = df_bib.copy()
             if filtro_busca_pdf.strip():
                 df_exibir_pdf = df_exibir_pdf[
@@ -1060,10 +1066,8 @@ elif "Biblioteca de Desenhos" in opcao:
                 ]
             if filtro_proj_pdf != "Todos os Projetos":
                 df_exibir_pdf = df_exibir_pdf[df_exibir_pdf['nome_projeto'] == filtro_proj_pdf]
-
             st.write("---")
             st.subheader(f"📑 Desenhos Encontrados ({len(df_exibir_pdf)})")
-
             for _, row_pdf in df_exibir_pdf.iterrows():
                 with st.expander(f"📄 #{row_pdf['id']} - {row_pdf['titulo']} ({row_pdf['nome_projeto'] or 'Sem Projeto'})"):
                     c_det1, c_det2 = st.columns([3, 1])
@@ -1071,7 +1075,6 @@ elif "Biblioteca de Desenhos" in opcao:
                         st.write(f"**Descrição:** {row_pdf['descricao'] or 'Sem descrição'}")
                         st.write(f"**Arquivo Original:** `{row_pdf['nome_arquivo_original']}`")
                         st.write(f"**Data de Upload:** {row_pdf['data_upload']} | **Enviado por:** {row_pdf['usuario']}")
-
                         if os.path.exists(row_pdf['pdf_path']):
                             with open(row_pdf['pdf_path'], "rb") as pdf_f:
                                 bytes_pdf = pdf_f.read()
@@ -1084,18 +1087,13 @@ elif "Biblioteca de Desenhos" in opcao:
                             )
                         else:
                             st.error("⚠️ O arquivo físico em PDF não foi encontrado no servidor.")
-
                     with c_det2:
                         st.markdown("**Ações do Item:**")
-                        # ALTERAÇÃO DO ITEM
                         if st.button("✏️ Alterar", key=f"btn_alt_{row_pdf['id']}"):
                             st.session_state[f"edit_mode_{row_pdf['id']}"] = True
-
-                        # EXCLUSÃO DO ITEM
                         if st.button("🗑️ Excluir", key=f"btn_exc_{row_pdf['id']}", type="secondary"):
                             st.session_state[f"del_mode_{row_pdf['id']}"] = True
-
-                    # FORMULÁRIO DE EDIÇÃO (QUANDO ATIVADO)
+                    
                     if st.session_state.get(f"edit_mode_{row_pdf['id']}", False):
                         st.warning(f"✏️ Editando Item #{row_pdf['id']}")
                         with st.form(key=f"form_edit_pdf_{row_pdf['id']}"):
@@ -1118,13 +1116,11 @@ elif "Biblioteca de Desenhos" in opcao:
                                 sub_edit = st.form_submit_button("💾 Salvar Alterações", type="primary")
                             with col_f_btn2:
                                 sub_canc = st.form_submit_button("❌ Cancelar")
-
                             if sub_edit:
                                 n_path, n_orig = None, None
                                 if novo_pdf_up is not None:
                                     n_path = salvar_arquivo_seguro(novo_pdf_up, pasta_destino="biblioteca_pdf", tipo="pdf")
                                     n_orig = novo_pdf_up.name
-
                                 ok, msg = editar_desenho_projeto(row_pdf['id'], edit_tit, edit_desc, edit_proj_id, n_path, n_orig)
                                 if ok:
                                     st.success(msg)
@@ -1135,8 +1131,6 @@ elif "Biblioteca de Desenhos" in opcao:
                             elif sub_canc:
                                 st.session_state[f"edit_mode_{row_pdf['id']}"] = False
                                 st.rerun()
-
-                    # CONFIRMAÇÃO DE EXCLUSÃO (QUANDO ATIVADA)
                     if st.session_state.get(f"del_mode_{row_pdf['id']}", False):
                         st.error(f"⚠️ Tem certeza que deseja excluir o anexo '{row_pdf['titulo']}'?")
                         c_del_sim, c_del_nao = st.columns(2)
@@ -1153,7 +1147,6 @@ elif "Biblioteca de Desenhos" in opcao:
                             if st.button("🟢 Cancelar", key=f"conf_del_nao_{row_pdf['id']}"):
                                 st.session_state[f"del_mode_{row_pdf['id']}"] = False
                                 st.rerun()
-
     with tab_anexar:
         st.subheader("➕ Anexar Novo Arquivo PDF à Biblioteca")
         with st.form("form_novo_pdf_bib", clear_on_submit=True):
@@ -1277,16 +1270,41 @@ elif "Retirada / Devolução" in opcao:
         
         with col1:
             st.info(f"📦 **Item:** {row['nome']} \n\n🏷️ **Categoria:** {row['categoria']} \n\n📊 **Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
-            modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key="retirada_modo_medida")
-            if modo_medida == "Por Caixa":
-                qtd_cx_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {row['qtd_por_caixa']} unidades):", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_cx")
-                qtd_mov_final = qtd_cx_input * row['qtd_por_caixa']
-                st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
-            else:
-                qtd_mov_final = st.number_input(f"Qtd em Unidades ({row['unidade_medida']}):", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_un")
+            
+            # --- AJUSTE NA RETIRADA DE ACORDO COM A UNIDADE ---
+            medida_item = row['unidade_medida']
+            fator_emb = row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 1
+            
+            if medida_item == "Caixa":
+                modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key="retirada_modo_medida")
+                if modo_medida == "Por Caixa":
+                    qtd_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0)
+                    qtd_mov_final = qtd_input * fator_emb
+                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+                else:
+                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0)
+            elif medida_item == "Pacote":
+                modo_medida = st.radio("Modo da Operação:", ["Por Unidade Avulsa", "Por Pacote Fechado"], horizontal=True, key="retirada_modo_medida")
+                if modo_medida == "Por Pacote Fechado":
+                    qtd_input = st.number_input(f"Qtd em Pacotes (Cada pacote contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0)
+                    qtd_mov_final = qtd_input * fator_emb
+                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+                else:
+                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0)
+            elif medida_item in ["Metro", "Rolo"]:
+                modo_medida = st.radio("Modo da Operação:", ["Por Metros", "Por Rolos Fechados"], horizontal=True, key="retirada_modo_medida")
+                if modo_medida == "Por Rolos Fechados":
+                    qtd_input = st.number_input(f"Qtd de Rolos (Cada rolo tem {fator_emb}m):", min_value=0.1, step=1.0, value=1.0)
+                    qtd_mov_final = qtd_input * fator_emb
+                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Metros**")
+                else:
+                    qtd_mov_final = st.number_input("Qtd em Metros:", min_value=0.1, step=0.5, value=1.0)
+            else: # Unidade
+                qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_un")
             
             eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
             responsavel_epi = ""
+            
         with col2:
             st.write("📋 **Destinação e Responsável:**")
             
@@ -1347,10 +1365,20 @@ elif "Cadastrar Produto" in opcao:
             localizacao = st.text_input("📍 Localização / Corredor/Prateleira", value="Almoxarifado Principal")
             qtd_minima = st.number_input("🔔 Quantidade Mínima (Aviso de Compras)", min_value=0.0, step=1.0, value=5.0)
         with c2:
-            unidade_medida = st.selectbox("📏 Unidade de Medida", ["Caixa", "Metro", "Pacote", "Unidade"])
+            # --- OPÇÕES AMPLIADAS DE UNIDADES DE MEDIDA ---
+            unidade_medida = st.selectbox(
+                "📏 Unidade de Medida", 
+                ["Unidade", "Caixa", "Pacote", "Metro", "Rolo"]
+            )
+            
             qtd_por_caixa = 1
             if unidade_medida == "Caixa":
-                qtd_por_caixa = st.number_input("📦 Qtd de Itens dentro da Caixa", min_value=1, value=1)
+                qtd_por_caixa = st.number_input("📦 Qtd de Itens (Volumes Únicos) dentro de 1 Caixa", min_value=1, value=1)
+            elif unidade_medida == "Pacote":
+                qtd_por_caixa = st.number_input("📦 Qtd de Itens (Volumes Únicos) dentro de 1 Pacote", min_value=1, value=1)
+            elif unidade_medida in ["Metro", "Rolo"]:
+                qtd_por_caixa = st.number_input("📏 Metragem Padrão de cada Rolo (em Metros)", min_value=1, value=100)
+
             quantidade = st.number_input("📊 Quantidade Inicial em Estoque", min_value=0.0, step=1.0, value=0.0)
             foto = st.file_uploader("🖼️ Foto do Produto (Opcional)", type=["jpg", "png", "jpeg"])
             
@@ -1496,7 +1524,7 @@ elif "Importar Dados" in opcao:
                             str(row.get('categoria', 'Geral')),
                             str(row.get('localizacao', 'Não informada')),
                             float(row.get('quantidade', 0)),
-                            str(row.get('unidade_medida', 'Caixa')),
+                            str(row.get('unidade_medida', 'Unidade')),
                             int(row.get('qtd_por_caixa', 1)),
                             codigo_barras=str(row.get('codigo_barras', "")),
                             ca=str(row.get('ca', "")),
@@ -1527,7 +1555,7 @@ elif "Importar Dados" in opcao:
                             str(row.get('categoria', 'Geral')),
                             str(row.get('localizacao', 'Não informada')),
                             float(row.get('quantidade', 0)),
-                            str(row.get('unidade_medida', 'Caixa')),
+                            str(row.get('unidade_medida', 'Unidade')),
                             int(row.get('qtd_por_caixa', 1)),
                             codigo_barras=str(row.get('codigo_barras', "")),
                             ca=str(row.get('ca', "")),
@@ -1546,7 +1574,6 @@ elif "Dashboard Analytics" in opcao:
     df_hist = buscar_historico()
     df_nf = buscar_notas_fiscais()
     df_proj = buscar_projetos()
-
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     with kpi1:
         st.metric("Total de Produtos", len(df_prod))
@@ -1565,7 +1592,6 @@ elif "Dashboard Analytics" in opcao:
         else:
             projetos_7d = 0
         st.metric("Projetos Ativos (Últimos 7 Dias)", projetos_7d)
-
     st.write("---")
     st.subheader("🏗️ Levantamento e Consumo por Projeto")
     if not df_hist.empty:
@@ -1585,7 +1611,6 @@ elif "Dashboard Analytics" in opcao:
             st.info("Nenhuma saída vinculada a projetos no histórico.")
     else:
         st.info("Sem dados de histórico de retiradas.")
-
     st.write("---")
     st.subheader("💰 Análise Financeira de Gastos e Comparação por Períodos")
     if not df_nf.empty:
@@ -1736,7 +1761,7 @@ elif "Personalizar Empresa" in opcao and st.session_state.perfil == "Admin":
             else:
                 st.error(msg)
 
-# --- ABA 12: FOX ASSISTENTE (GEMINI AI COM ACESSO AOS DADOS DO BANCO) ---
+# --- ABA 12: FOX ASSISTENTE (GEMINI AI) ---
 elif "Fox Assistente" in opcao:
     st.title("🦊 Fox Assistente - Almoxarifado Inteligente")
     st.caption("Sua assistente integrada que lê o banco de dados, compara preços, analisa BI e tira dúvidas!")
@@ -1768,7 +1793,7 @@ Você é a Fox Assistente, a inteligência virtual simpática e especialista do 
 8. **Dashboard Analytics (BI):** Apresenta comparativos de gastos por período (até 12 meses), levantamento de custos por projeto e ranking dos top 10 itens retirados.
 9. **Histórico e Retenção:** Guarda histórico completo com limpeza automática de registros superiores a 18 meses.
 ---
-### TABELAS E DADOS EM TEMPO REAL DO ALMOXARIFADO (USE PARA COMPARAR PREÇOS E DAR SUGESTÕES DE BI):
+### TABELAS E DADOS EM TEMPO REAL DO ALMOXARIFADO:
 **1. TABELA DE PRODUTOS E ESTOQUE:**
 {resumo_produtos}
 **2. TABELA DE PREÇOS E NOTAS FISCAIS (COMPRAS):**
@@ -1785,7 +1810,6 @@ Sua missão:
             avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
             with st.chat_message(msg["role"], avatar=avatar_icon):
                 st.markdown(msg["content"])
-
         if prompt := st.chat_input("Pergunte sobre preços, produtos, projetos ou relatórios do BI:"):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
@@ -1793,8 +1817,6 @@ Sua missão:
                 
             try:
                 conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION_DINAMICO}\n\nPergunta do usuário: {prompt}"
-                
-                # MODELO ATUALIZADO SOLICITADO PELA API
                 response = client_gemini.models.generate_content(
                     model="gemini-3.6-flash",
                     contents=conteudo_envio,
