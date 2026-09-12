@@ -227,6 +227,7 @@ def inicializar_banco():
                 data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS biblioteca_projetos (
                 id SERIAL PRIMARY KEY,
@@ -239,12 +240,26 @@ def inicializar_banco():
                 usuario TEXT DEFAULT 'Sistema'
             );
             """)
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ferramentas (
+                id SERIAL PRIMARY KEY,
+                local TEXT DEFAULT 'Almoxarifado',
+                codigo TEXT UNIQUE NOT NULL,
+                ferramenta TEXT NOT NULL,
+                marca TEXT DEFAULT '',
+                funcionario TEXT DEFAULT 'Almoxarifado',
+                ultimo_funcionario TEXT DEFAULT '',
+                data_ultimo_emprestimo TIMESTAMP
+            );
+            """)
             
             try:
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS nome_retirou TEXT DEFAULT '';")
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS projeto_nome TEXT DEFAULT '';")
             except Exception:
                 pass
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -466,6 +481,65 @@ def estornar_movimentacao(historico_id, usuario_logado):
     except Exception as e:
         conn.rollback()
         return False, f"Erro ao processar estorno: {str(e)}"
+
+# --- MÓDULO DE GESTÃO DE FERRAMENTAS ---
+@st.cache_data(ttl=15)
+def buscar_ferramentas():
+    conn = conectar()
+    return pd.read_sql_query("SELECT id, local, codigo, ferramenta, marca, funcionario, ultimo_funcionario, data_ultimo_emprestimo FROM ferramentas ORDER BY id ASC", conn)
+
+def cadastrar_ferramenta(local, codigo, ferramenta, marca):
+    conn = conectar()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO ferramentas (local, codigo, ferramenta, marca, funcionario) VALUES (%s, %s, %s, %s, 'Almoxarifado')",
+                (local.strip(), codigo.strip(), ferramenta.strip(), marca.strip())
+            )
+            conn.commit()
+            st.cache_data.clear()
+            return True, f"Ferramenta '{ferramenta}' cadastrada com sucesso!"
+    except Exception as e:
+        conn.rollback()
+        return False, f"Erro ao cadastrar ferramenta: {e}"
+
+def movimentar_ferramenta(codigo, novo_funcionario):
+    conn = conectar()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT funcionario FROM ferramentas WHERE codigo = %s", (codigo.strip(),))
+            res = cursor.fetchone()
+            if not res:
+                return False, f"Ferramenta com código '{codigo}' não encontrada!"
+            
+            funcionario_atual = res[0]
+            if novo_funcionario.strip().upper() == "ALMOXARIFADO":
+                # Processo de Devolução
+                cursor.execute(
+                    "UPDATE ferramentas SET funcionario = 'Almoxarifado' WHERE codigo = %s",
+                    (codigo.strip(),)
+                )
+                msg = "Ferramenta devolvida ao Almoxarifado com sucesso!"
+            else:
+                # Processo de Retirada
+                cursor.execute(
+                    """
+                    UPDATE ferramentas 
+                    SET ultimo_funcionario = CASE WHEN funcionario <> 'Almoxarifado' AND funcionario <> '' THEN funcionario ELSE ultimo_funcionario END,
+                        funcionario = %s,
+                        data_ultimo_emprestimo = NOW()
+                    WHERE codigo = %s
+                    """,
+                    (novo_funcionario.strip(), codigo.strip())
+                )
+                msg = f"Empréstimo da ferramenta registrado para {novo_funcionario}!"
+            
+            conn.commit()
+            st.cache_data.clear()
+            return True, msg
+    except Exception as e:
+        conn.rollback()
+        return False, f"Erro ao atualizar ferramenta: {e}"
 
 # --- MÓDULO DE PROJETOS E EQUIPE ---
 @st.cache_data(ttl=15)
@@ -788,7 +862,6 @@ else:
 
 st.sidebar.title(f"🏢 {config['nome_empresa']}")
 st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
-
 if config['logo_path'] and os.path.exists(config['logo_path']):
     st.sidebar.image(config['logo_path'], use_container_width=True)
 
@@ -947,7 +1020,7 @@ elif "Pedidos de Compras" in opcao:
     
     df_prod = buscar_produtos()
     if df_prod.empty:
-        st.info("Nenhum produto cadastrado.")
+        st.info("Nenum produto cadastrado.")
     else:
         df_faltantes = df_prod[df_prod['quantidade'] <= df_prod['qtd_minima']].copy()
         if df_faltantes.empty:
@@ -1189,168 +1262,236 @@ elif "Biblioteca de Desenhos" in opcao:
 # --- ABA 2: CHECKLIST DE FERRAMENTAS ---
 elif "Checklist de Ferramentas" in opcao:
     st.title("📋 Checklist de Ferramentas e Equipamentos")
-    st.caption("Realize a conferência das ferramentas. Os EPIs e insumos de consumo não aparecem nesta tela.")
+    tab_chk, tab_cad_ferr = st.tabs(["📋 Realizar Checklist", "🛠️ Cadastro / Gestão de Ferramentas"])
     
-    df_prod = buscar_produtos()
-    if not df_prod.empty:
-        filtro_incluir = df_prod['categoria'].str.contains("Ferramenta|Equipamento", case=False, na=False)
-        filtro_excluir_epi = ~df_prod['categoria'].str.contains("EPI", case=False, na=False) & ~df_prod['nome'].str.contains("EPI", case=False, na=False)
-        df_ferramentas = df_prod[filtro_incluir & filtro_excluir_epi]
-    else:
-        df_ferramentas = pd.DataFrame()
-    if df_ferramentas.empty:
-        st.warning("Nenhuma ferramenta/equipamento cadastrado.")
-    else:
-        st.subheader("✅ Lista de Verificação")
-        with st.form("form_checklist", clear_on_submit=True):
-            itens_checklist = []
-            for idx, row in df_ferramentas.iterrows():
-                st.markdown(f"🛠️ **Item:** '{row['nome']}' | Local: *{row['localizacao']}*")
-                c1, c2 = st.columns([2, 3])
-                with c1:
-                    status = st.selectbox(f"Status - {row['nome']}", ["OK/Operacional", "Defeituoso", "Em Manutenção", "Ausente"], key=f"status_{row['id']}")
-                with c2:
-                    obs_item = st.text_input(f"Observações - {row['nome']}", key=f"obs_{row['id']}", placeholder="Detalhes de danos/avarias...")
-                itens_checklist.append({"ferramenta": row['nome'], "status": status, "obs": obs_item})
+    with tab_chk:
+        st.caption("Realize a conferência das ferramentas. Os EPIs e insumos de consumo não aparecem nesta tela.")
+        df_prod = buscar_produtos()
+        if not df_prod.empty:
+            filtro_incluir = df_prod['categoria'].str.contains("Ferramenta|Equipamento", case=False, na=False)
+            filtro_excluir_epi = ~df_prod['categoria'].str.contains("EPI", case=False, na=False) & ~df_prod['nome'].str.contains("EPI", case=False, na=False)
+            df_ferramentas = df_prod[filtro_incluir & filtro_excluir_epi]
+        else:
+            df_ferramentas = pd.DataFrame()
+        if df_ferramentas.empty:
+            st.warning("Nenhuma ferramenta/equipamento cadastrado.")
+        else:
+            st.subheader("✅ Lista de Verificação")
+            with st.form("form_checklist", clear_on_submit=True):
+                itens_checklist = []
+                for idx, row in df_ferramentas.iterrows():
+                    st.markdown(f"🛠️ **Item:** '{row['nome']}' | Local: *{row['localizacao']}*")
+                    c1, c2 = st.columns([2, 3])
+                    with c1:
+                        status = st.selectbox(f"Status - {row['nome']}", ["OK/Operacional", "Defeituoso", "Em Manutenção", "Ausente"], key=f"status_{row['id']}")
+                    with c2:
+                        obs_item = st.text_input(f"Observações - {row['nome']}", key=f"obs_{row['id']}", placeholder="Detalhes de danos/avarias...")
+                    itens_checklist.append({"ferramenta": row['nome'], "status": status, "obs": obs_item})
+                
+                st.write("---")
+                obs_gerais = st.text_area("✍️ Observações Gerais da Inspeção:", placeholder="Informe detalhes do estado do carrinho, maletas, etc.")
+                btn_gerar_chk = st.form_submit_button("📄 Finalizar Checklist e Gerar PDF", type="primary")
+                
+                if btn_gerar_chk:
+                    try:
+                        path_pdf = gerar_pdf_checklist("Checklist Diário", st.session_state.usuario, itens_checklist, obs_gerais)
+                        salvar_registro_checklist(st.session_state.usuario, path_pdf, obs_gerais)
+                        st.success("✅ Checklist concluído com sucesso! Relatório PDF gerado.")
+                        with open(path_pdf, "rb") as f:
+                            st.download_button(
+                                label="⬇️ Baixar Relatório PDF Gerado",
+                                data=f.read(),
+                                file_name=os.path.basename(path_pdf),
+                                mime="application/pdf"
+                            )
+                    except Exception as e:
+                        st.error(f"Erro ao gerar relatório: {e}")
+
+    with tab_cad_ferr:
+        st.subheader("🛠️ Cadastrar Nova Ferramenta")
+        with st.form("form_cad_ferramenta", clear_on_submit=True):
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                f_local = st.text_input("📍 Local", value="Almoxarifado")
+                f_codigo = st.text_input("🔑 Código *", placeholder="Ex: FER-001")
+            with fc2:
+                f_nome = st.text_input("🛠️ Ferramenta *", placeholder="Ex: Furadeira de Impacto")
+                f_marca = st.text_input("🏷️ Marca", placeholder="Ex: Bosch")
             
-            st.write("---")
-            obs_gerais = st.text_area("✍️ Observações Gerais da Inspeção:", placeholder="Informe detalhes do estado do carrinho, maletas, etc.")
-            btn_gerar_chk = st.form_submit_button("📄 Finalizar Checklist e Gerar PDF", type="primary")
-            
-            if btn_gerar_chk:
-                try:
-                    path_pdf = gerar_pdf_checklist("Checklist Diário", st.session_state.usuario, itens_checklist, obs_gerais)
-                    salvar_registro_checklist(st.session_state.usuario, path_pdf, obs_gerais)
-                    st.success("✅ Checklist concluído com sucesso! Relatório PDF gerado.")
-                    with open(path_pdf, "rb") as f:
-                        st.download_button(
-                            label="⬇️ Baixar Relatório PDF Gerado",
-                            data=f.read(),
-                            file_name=os.path.basename(path_pdf),
-                            mime="application/pdf"
-                        )
-                except Exception as e:
-                    st.error(f"Erro ao gerar relatório: {e}")
+            if st.form_submit_button("💾 Salvar Ferramenta", type="primary"):
+                if f_codigo.strip() and f_nome.strip():
+                    ok, msg = cadastrar_ferramenta(f_local, f_codigo, f_nome, f_marca)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("⚠️ Código e Nome da Ferramenta são obrigatórios!")
+        
+        st.write("---")
+        st.subheader("📋 Ferramentas Cadastradas e Status de Empréstimo")
+        df_f = buscar_ferramentas()
+        if not df_f.empty:
+            st.dataframe(df_f[['id', 'local', 'codigo', 'ferramenta', 'marca', 'funcionario', 'ultimo_funcionario', 'data_ultimo_emprestimo']], use_container_width=True)
+        else:
+            st.info("Nenhuma ferramenta cadastrada no controle individual.")
 
 # --- ABA 3: RETIRADA E DEVOLUÇÃO DE MATERIAIS ---
 elif "Retirada / Devolução" in opcao:
-    st.title("🔄 Retirada / Devolução de Materiais")
+    st.title("🔄 Retirada / Devolução de Materiais e Ferramentas")
     df_prod = buscar_produtos()
     df_proj = buscar_projetos()
     df_eq = buscar_equipe_projeto()
-    
-    if df_prod.empty:
-        st.info("Nenhum produto cadastrado.")
-    else:
-        st.subheader("1. Tipo de Operação")
-        tipo_operacao = st.radio("Selecione a Ação:", ["📤 Retirada (Saída)", "📥 Devolução (Entrada/Reinserção)"], horizontal=True)
-        tipo_mov_banco = "SAÍDA" if "Retirada" in tipo_operacao else "DEVOLUÇÃO"
-        
-        st.write("---")
-        st.subheader("2. Selecionar Produto")
-        cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:", key="retirada_cod_bipado")
-        
-        prod_selecionado = None
-        if cod_bipado.strip():
-            match = df_prod[df_prod['codigo_barras'].astype(str) == cod_bipado.strip()]
-            if not match.empty:
-                prod_selecionado = match.iloc[0]['nome']
-                st.success(f"Item Encontrado: **{prod_selecionado}**")
-            else:
-                st.warning("Código de barras não encontrado no cadastro.")
+    df_f = buscar_ferramentas()
+
+    tab_mat, tab_ferr_retirada = st.tabs(["📦 Materiais e Insumos", "🔧 Retirada / Devolução de Ferramentas"])
+
+    with tab_mat:
+        if df_prod.empty:
+            st.info("Nenhum produto cadastrado.")
+        else:
+            st.subheader("1. Tipo de Operação")
+            tipo_operacao = st.radio("Selecione a Ação:", ["📤 Retirada (Saída)", "📥 Devolução (Entrada/Reinserção)"], horizontal=True)
+            tipo_mov_banco = "SAÍDA" if "Retirada" in tipo_operacao else "DEVOLUÇÃO"
+            
+            st.write("---")
+            st.subheader("2. Selecionar Produto")
+            cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:", key="retirada_cod_bipado")
+            
+            prod_selecionado = None
+            if cod_bipado.strip():
+                match = df_prod[df_prod['codigo_barras'].astype(str) == cod_bipado.strip()]
+                if not match.empty:
+                    prod_selecionado = match.iloc[0]['nome']
+                    st.success(f"Item Encontrado: **{prod_selecionado}**")
+                else:
+                    st.warning("Código de barras não encontrado no cadastro.")
+                    
+            if not prod_selecionado:
+                prod_selecionado = st.selectbox("Ou Escolha o Item na Lista:", df_prod['nome'].tolist(), key="retirada_select_item")
                 
-        if not prod_selecionado:
-            prod_selecionado = st.selectbox("Ou Escolha o Item na Lista:", df_prod['nome'].tolist(), key="retirada_select_item")
+            row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
             
-        row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
-        
-        st.write("---")
-        st.subheader(f"3. Dados para {tipo_operacao}")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.info(f"📦 **Item:** {row['nome']} \n\n🏷️ **Categoria:** {row['categoria']} \n\n📊 **Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
+            st.write("---")
+            st.subheader(f"3. Dados para {tipo_operacao}")
+            col1, col2 = st.columns(2)
             
-            # --- AJUSTE NA RETIRADA DE ACORDO COM A UNIDADE ---
-            medida_item = row['unidade_medida']
-            fator_emb = row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 1
+            with col1:
+                st.info(f"📦 **Item:** {row['nome']} \n\n🏷️ **Categoria:** {row['categoria']} \n\n📊 **Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
+                
+                # --- AJUSTE NA RETIRADA DE ACORDO COM A UNIDADE ---
+                medida_item = row['unidade_medida']
+                fator_emb = row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 1
+                
+                if medida_item == "Caixa":
+                    modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key="retirada_modo_medida")
+                    if modo_medida == "Por Caixa":
+                        qtd_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0)
+                        qtd_mov_final = qtd_input * fator_emb
+                        st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+                    else:
+                        qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0)
+                elif medida_item == "Pacote":
+                    modo_medida = st.radio("Modo da Operação:", ["Por Unidade Avulsa", "Por Pacote Fechado"], horizontal=True, key="retirada_modo_medida")
+                    if modo_medida == "Por Pacote Fechado":
+                        qtd_input = st.number_input(f"Qtd em Pacotes (Cada pacote contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0)
+                        qtd_mov_final = qtd_input * fator_emb
+                        st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+                    else:
+                        qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0)
+                elif medida_item in ["Metro", "Rolo"]:
+                    modo_medida = st.radio("Modo da Operação:", ["Por Metros", "Por Rolos Fechados"], horizontal=True, key="retirada_modo_medida")
+                    if modo_medida == "Por Rolos Fechados":
+                        qtd_input = st.number_input(f"Qtd de Rolos (Cada rolo tem {fator_emb}m):", min_value=0.1, step=1.0, value=1.0)
+                        qtd_mov_final = qtd_input * fator_emb
+                        st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Metros**")
+                    else:
+                        qtd_mov_final = st.number_input("Qtd em Metros:", min_value=0.1, step=0.5, value=1.0)
+                else: # Unidade
+                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_un")
+                
+                eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
+                responsavel_epi = ""
+                
+            with col2:
+                st.write("📋 **Destinação e Responsável:**")
+                
+                lista_projetos = ["Geral / Sem Projeto Específico"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
+                projeto_selecionado = st.selectbox("🏗️ Projeto Destino:", lista_projetos)
+                
+                colaboradores_sugeridos = []
+                if projeto_selecionado != "Geral / Sem Projeto Específico" and not df_eq.empty:
+                    colaboradores_sugeridos = df_eq[df_eq['nome_projeto'] == projeto_selecionado]['nome_colaborador'].tolist()
+                
+                nome_retirou = st.text_input("👤 Nome de Quem Retirou *:", placeholder="Informe o nome da pessoa que está pegando o material")
+                if colaboradores_sugeridos:
+                    st.caption(f"💡 Sugestões da equipe do projeto: {', '.join(colaboradores_sugeridos)}")
+                if eh_epi:
+                    st.warning("⚠️ **ESTE ITEM É UM EPI!**")
+                    if row.get('ca'):
+                        st.info(f"🛡️ **Número do CA do EPI:** {row['ca']}")
+                    responsavel_epi = st.text_input("👤 Matrícula/Nome p/ Registro de EPI:", value=nome_retirou, key="retirada_resp_epi")
+            st.write("---")
+            btn_label = "📤 Confirmar Retirada de Item" if tipo_mov_banco == "SAÍDA" else "📥 Confirmar Devolução e Recompor Estoque"
             
-            if medida_item == "Caixa":
-                modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key="retirada_modo_medida")
-                if modo_medida == "Por Caixa":
-                    qtd_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0)
-                    qtd_mov_final = qtd_input * fator_emb
-                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+            if st.button(btn_label, type="primary"):
+                if tipo_mov_banco == "SAÍDA" and not nome_retirou.strip():
+                    st.error("❌ Por favor, informe o **Nome de quem retirou** o material!")
+                elif eh_epi and not responsavel_epi.strip():
+                    st.error("❌ Erro: Preencha a verificação de EPI!")
                 else:
-                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0)
-            elif medida_item == "Pacote":
-                modo_medida = st.radio("Modo da Operação:", ["Por Unidade Avulsa", "Por Pacote Fechado"], horizontal=True, key="retirada_modo_medida")
-                if modo_medida == "Por Pacote Fechado":
-                    qtd_input = st.number_input(f"Qtd em Pacotes (Cada pacote contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0)
-                    qtd_mov_final = qtd_input * fator_emb
-                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
-                else:
-                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0)
-            elif medida_item in ["Metro", "Rolo"]:
-                modo_medida = st.radio("Modo da Operação:", ["Por Metros", "Por Rolos Fechados"], horizontal=True, key="retirada_modo_medida")
-                if modo_medida == "Por Rolos Fechados":
-                    qtd_input = st.number_input(f"Qtd de Rolos (Cada rolo tem {fator_emb}m):", min_value=0.1, step=1.0, value=1.0)
-                    qtd_mov_final = qtd_input * fator_emb
-                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Metros**")
-                else:
-                    qtd_mov_final = st.number_input("Qtd em Metros:", min_value=0.1, step=0.5, value=1.0)
-            else: # Unidade
-                qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key="retirada_qtd_un")
-            
-            eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
-            responsavel_epi = ""
-            
-        with col2:
-            st.write("📋 **Destinação e Responsável:**")
-            
-            lista_projetos = ["Geral / Sem Projeto Específico"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
-            projeto_selecionado = st.selectbox("🏗️ Projeto Destino:", lista_projetos)
-            
-            colaboradores_sugeridos = []
-            if projeto_selecionado != "Geral / Sem Projeto Específico" and not df_eq.empty:
-                colaboradores_sugeridos = df_eq[df_eq['nome_projeto'] == projeto_selecionado]['nome_colaborador'].tolist()
-            
-            nome_retirou = st.text_input("👤 Nome de Quem Retirou *:", placeholder="Informe o nome da pessoa que está pegando o material")
-            if colaboradores_sugeridos:
-                st.caption(f"💡 Sugestões da equipe do projeto: {', '.join(colaboradores_sugeridos)}")
-            if eh_epi:
-                st.warning("⚠️ **ESTE ITEM É UM EPI!**")
-                if row.get('ca'):
-                    st.info(f"🛡️ **Número do CA do EPI:** {row['ca']}")
-                responsavel_epi = st.text_input("👤 Matrícula/Nome p/ Registro de EPI:", value=nome_retirou, key="retirada_resp_epi")
-        st.write("---")
-        btn_label = "📤 Confirmar Retirada de Item" if tipo_mov_banco == "SAÍDA" else "📥 Confirmar Devolução e Recompor Estoque"
+                    ok, msg = movimentar_produto(
+                        int(row['id']),
+                        tipo_mov_banco,
+                        float(qtd_mov_final),
+                        float(row['quantidade']),
+                        st.session_state.usuario,
+                        responsavel_epi,
+                        nome_retirou,
+                        projeto_selecionado
+                    )
+                    if ok:
+                        st.success(f"✅ Operação realizada com sucesso! {msg}")
+                        if "retirada_cod_bipado" in st.session_state:
+                            del st.session_state["retirada_cod_bipado"]
+                        if "retirada_resp_epi" in st.session_state:
+                            del st.session_state["retirada_resp_epi"]
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+    with tab_ferr_retirada:
+        st.subheader("🔧 Movimentação de Ferramentas")
         
-        if st.button(btn_label, type="primary"):
-            if tipo_mov_banco == "SAÍDA" and not nome_retirou.strip():
-                st.error("❌ Por favor, informe o **Nome de quem retirou** o material!")
-            elif eh_epi and not responsavel_epi.strip():
-                st.error("❌ Erro: Preencha a verificação de EPI!")
-            else:
-                ok, msg = movimentar_produto(
-                    int(row['id']),
-                    tipo_mov_banco,
-                    float(qtd_mov_final),
-                    float(row['quantidade']),
-                    st.session_state.usuario,
-                    responsavel_epi,
-                    nome_retirou,
-                    projeto_selecionado
+        acao_ferr = st.radio("Selecione a Operação de Ferramentas:", ["📤 Retirada de Ferramenta", "📥 Devolução para Almoxarifado"], horizontal=True)
+        
+        if df_f.empty:
+            st.info("Nenhuma ferramenta cadastrada. Acesse a aba 'Checklist de Ferramentas' -> 'Cadastro / Gestão de Ferramentas' para cadastrar.")
+        else:
+            with st.form("form_mov_ferramenta", clear_on_submit=True):
+                codigo_ferr = st.selectbox(
+                    "🔑 Selecione a Ferramenta pelo Código:",
+                    options=df_f['codigo'].tolist(),
+                    format_func=lambda x: f"{x} - {df_f[df_f['codigo']==x]['ferramenta'].values[0]} ({'Empréstimo: ' + df_f[df_f['codigo']==x]['funcionario'].values[0] if df_f[df_f['codigo']==x]['funcionario'].values[0] != 'Almoxarifado' else 'Disponível no Almoxarifado'})"
                 )
-                if ok:
-                    st.success(f"✅ Operação realizada com sucesso! {msg}")
-                    if "retirada_cod_bipado" in st.session_state:
-                        del st.session_state["retirada_cod_bipado"]
-                    if "retirada_resp_epi" in st.session_state:
-                        del st.session_state["retirada_resp_epi"]
-                    st.rerun()
+                
+                if "Retirada" in acao_ferr:
+                    nome_func_novo = st.text_input("👤 Nome do Funcionário que está Retirando *:", placeholder="Informe o nome de quem ficará com a ferramenta")
                 else:
-                    st.error(msg)
+                    st.info("ℹ️ A ferramenta selecionada retornará para o status **'Almoxarifado'** (não em empréstimo).")
+                    nome_func_novo = "Almoxarifado"
+                
+                if st.form_submit_button("🚀 Confirmar Movimentação de Ferramenta", type="primary"):
+                    if "Retirada" in acao_ferr and not nome_func_novo.strip():
+                        st.warning("⚠️ Informe o nome do funcionário para retirar a ferramenta.")
+                    else:
+                        ok, msg = movimentar_ferramenta(codigo_ferr, nome_func_novo)
+                        if ok:
+                            st.success(f"✅ {msg}")
+                            st.rerun()
+                        else:
+                            st.error(msg)
 
 # --- ABA 4: CADASTRO DE PRODUTO ---
 elif "Cadastrar Produto" in opcao:
@@ -1378,7 +1519,6 @@ elif "Cadastrar Produto" in opcao:
                 qtd_por_caixa = st.number_input("📦 Qtd de Itens (Volumes Únicos) dentro de 1 Pacote", min_value=1, value=1)
             elif unidade_medida in ["Metro", "Rolo"]:
                 qtd_por_caixa = st.number_input("📏 Metragem Padrão de cada Rolo (em Metros)", min_value=1, value=100)
-
             quantidade = st.number_input("📊 Quantidade Inicial em Estoque", min_value=0.0, step=1.0, value=0.0)
             foto = st.file_uploader("🖼️ Foto do Produto (Opcional)", type=["jpg", "png", "jpeg"])
             
