@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fpdf import FPDF
 from google import genai
+from google.genai import types
 import matplotlib.pyplot as plt
 import pandas as pd
 import psycopg2
@@ -75,8 +76,10 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
         permitidas = EXTENSOES_PERMITIDAS_MAPA
     else:
         permitidas = EXTENSOES_PERMITIDAS_IMAGEM
+
     if ext not in permitidas:
         raise ValueError(f"Extensão não permitida: {ext}")
+
     novo_nome = f"{uuid.uuid4().hex}{ext}"
     caminho_completo = os.path.join(pasta_destino, novo_nome)
     with open(caminho_completo, "wb") as f:
@@ -223,6 +226,7 @@ def inicializar_banco():
             );
             """)
             
+            # Garantir colunas no histórico caso a tabela já existisse antes
             try:
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS nome_retirou TEXT DEFAULT '';")
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS projeto_nome TEXT DEFAULT '';")
@@ -265,6 +269,7 @@ def inicializar_banco():
             );
             """)
             
+            # Executar Limpeza Automática de Histórico com mais de 18 meses (540 dias)
             cursor.execute("DELETE FROM historico WHERE data_hora < NOW() - INTERVAL '540 days';")
             cursor.execute("SELECT COUNT(*) FROM usuarios")
             if cursor.fetchone()[0] == 0:
@@ -386,31 +391,19 @@ def mesclar_produtos(id_destino, lista_ids_origem):
         conn.rollback()
         return False, f"Erro ao mesclar produtos: {e}"
 
-# --- OPÇÃO 1 APLICADA: ATUALIZAÇÃO ATÔMICA NO POSTGRESQL PARA PREVENIR CONCORRÊNCIA ---
 def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, responsavel_epi="", nome_retirou="", projeto_nome=""):
     tipo_upper = tipo.upper()
+    if tipo_upper == "SAÍDA" and qtd_mov > qtd_atual:
+        return False, f"Estoque insuficiente! Saldo atual: {qtd_atual:.2f}"
+    
+    if tipo_upper in ["ENTRADA", "DEVOLUÇÃO", "DEVOLUCAO"]:
+        nova_qtd = qtd_atual + qtd_mov
+    else:
+        nova_qtd = qtd_atual - qtd_mov
     conn = conectar()
     try:
         with conn.cursor() as cursor:
-            if tipo_upper in ["ENTRADA", "DEVOLUÇÃO", "DEVOLUCAO"]:
-                cursor.execute("""
-                    UPDATE produtos 
-                    SET quantidade = quantidade + %s 
-                    WHERE id = %s
-                """, (qtd_mov, prod_id))
-            else:
-                # Na retirada/saída, atualiza apenas se houver quantidade disponível suficiente no exato instante do UPDATE
-                cursor.execute("""
-                    UPDATE produtos 
-                    SET quantidade = quantidade - %s 
-                    WHERE id = %s AND quantidade >= %s
-                """, (qtd_mov, prod_id, qtd_mov))
-                
-                # Se rowcount for 0, o banco recusou a atualização por falta de saldo
-                if cursor.rowcount == 0:
-                    conn.rollback()
-                    return False, "❌ Operação cancelada! O estoque foi alterado por outro usuário ou saldo insuficiente."
-
+            cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
             cursor.execute(
                 "INSERT INTO historico (produto_id, tipo, quantidade, usuario, responsavel_epi, nome_retirou, projeto_nome) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (prod_id, tipo_upper, qtd_mov, usuario_logado, responsavel_epi, nome_retirou, projeto_nome)
@@ -922,6 +915,7 @@ elif "Gestão de Projetos" in opcao:
         st.write("---")
         st.subheader("📋 Lista de Projetos Registrados")
         st.dataframe(df_proj, use_container_width=True)
+
     with tab_eq:
         st.subheader("👤 Adicionar Colaborador ao Projeto")
         if df_proj.empty:
@@ -958,6 +952,7 @@ elif "Checklist de Ferramentas" in opcao:
         df_ferramentas = df_prod[filtro_incluir & filtro_excluir_epi]
     else:
         df_ferramentas = pd.DataFrame()
+
     if df_ferramentas.empty:
         st.warning("Nenhuma ferramenta/equipamento cadastrado.")
     else:
@@ -1043,9 +1038,11 @@ elif "Retirada / Devolução" in opcao:
         with col2:
             st.write("📋 **Destinação e Responsável:**")
             
+            # Opção de Selecionar Projeto
             lista_projetos = ["Geral / Sem Projeto Específico"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
             projeto_selecionado = st.selectbox("🏗️ Projeto Destino:", lista_projetos)
             
+            # Opção de Selecionar Quem Retirou (Filtra colaboradores do projeto se houver)
             colaboradores_sugeridos = []
             if projeto_selecionado != "Geral / Sem Projeto Específico" and not df_eq.empty:
                 colaboradores_sugeridos = df_eq[df_eq['nome_projeto'] == projeto_selecionado]['nome_colaborador'].tolist()
@@ -1299,7 +1296,7 @@ elif "Dashboard Analytics" in opcao:
     df_hist = buscar_historico()
     df_nf = buscar_notas_fiscais()
     df_proj = buscar_projetos()
-    
+    # MÉTRICAS GERAIS E INTELIGÊNCIA POR PROJETO
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     with kpi1:
         st.metric("Total de Produtos", len(df_prod))
@@ -1310,6 +1307,7 @@ elif "Dashboard Analytics" in opcao:
         total_retiradas = len(df_hist[df_hist['tipo'] == 'SAÍDA']) if not df_hist.empty else 0
         st.metric("Total de Retiradas", total_retiradas)
     with kpi4:
+        # PROJETOS ATIVOS NOS ÚLTIMOS 7 DIAS
         if not df_hist.empty:
             df_hist['data_hora'] = pd.to_datetime(df_hist['data_hora'])
             sete_dias_atras = datetime.now() - timedelta(days=7)
@@ -1487,10 +1485,10 @@ elif "Personalizar Empresa" in opcao and st.session_state.perfil == "Admin":
             else:
                 st.error(msg)
 
-# --- ABA 12: FOX ASSISTENTE (GEMINI AI OTIMIZADA E COMPLETA) ---
+# --- ABA 12: FOX ASSISTENTE (GEMINI AI COM ACESSO AOS DADOS DO BANCO) ---
 elif "Fox Assistente" in opcao:
-    st.title("🦊 Fox Assistente - Almoxarifado Inteligente")
-    st.caption("Sua assistente integrada que lê o banco de dados, compara preços, analisa BI e tira dúvidas!")
+    st.title("🦊 Fox Assistente - Almoxarifado Inteligente Multimodal")
+    st.caption("Sua assistente integrada que lê o banco de dados, analisa fotos, responde por voz e tira dúvidas!")
     
     if not client_gemini:
         st.error("Chave de API do Gemini não configurada em .streamlit/secrets.toml (GEMINI_API_KEY).")
@@ -1498,103 +1496,117 @@ elif "Fox Assistente" in opcao:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
             
-        # BUSCAR E CONSOLIDAR DADOS COMPLETO DO BANCO P/ A FOX
+        # BUSCAR CONTEXTO ATUAL DO BANCO PARA O ASSISTENTE LER PREÇOS E TABELAS
         df_p_ctx = buscar_produtos()
         df_nf_ctx = buscar_notas_fiscais()
         df_hist_ctx = buscar_historico()
         
-        # 1. Resumo do Estoque e Saldos
-        resumo_produtos = df_p_ctx[['nome', 'categoria', 'quantidade', 'unidade_medida', 'localizacao', 'qtd_minima']].to_string(index=False) if not df_p_ctx.empty else "Nenhum produto cadastrado."
-        
-        # 2. Resumo de Itens Críticos/Faltantes
-        df_faltantes_ctx = df_p_ctx[df_p_ctx['quantidade'] <= df_p_ctx['qtd_minima']] if not df_p_ctx.empty else pd.DataFrame()
-        resumo_faltantes = df_faltantes_ctx[['nome', 'categoria', 'quantidade', 'qtd_minima', 'unidade_medida']].to_string(index=False) if not df_faltantes_ctx.empty else "Nenhum item com estoque baixo ou zerado."
-
-        # 3. Histórico de Notas Fiscais e Preços
-        resumo_precos = df_nf_ctx[['produto_nome', 'fornecedor', 'valor_unitario', 'valor_total', 'data_recebimento']].to_string(index=False) if not df_nf_ctx.empty else "Nenhuma nota fiscal registrada."
-
-        # 4. Consumo Total Agregado por Projeto/Obra
-        if not df_hist_ctx.empty:
-            df_saidas_ctx = df_hist_ctx[df_hist_ctx['tipo'] == 'SAÍDA']
-            if not df_saidas_ctx.empty:
-                consumo_proj = df_saidas_ctx.groupby(['projeto_nome', 'produto'])['quantidade'].sum().reset_index()
-                resumo_projetos = consumo_proj.to_string(index=False)
-            else:
-                resumo_projetos = "Nenhum consumo por projeto registrado."
-        else:
-            resumo_projetos = "Nenhum histórico disponível."
-
-        # 5. Últimas Retiradas
-        resumo_saidas = df_hist_ctx[['produto', 'quantidade', 'nome_retirou', 'projeto_nome', 'data_hora']].head(30).to_string(index=False) if not df_hist_ctx.empty else "Nenhuma retirada recente."
+        resumo_produtos = df_p_ctx[['nome', 'quantidade', 'unidade_medida', 'localizacao']].to_string(index=False) if not df_p_ctx.empty else "Nenhum produto"
+        resumo_precos = df_nf_ctx[['produto_nome', 'fornecedor', 'valor_unitario', 'valor_total', 'data_recebimento']].head(20).to_string(index=False) if not df_nf_ctx.empty else "Nenhuma nota fiscal"
+        resumo_saidas = df_hist_ctx[['produto', 'quantidade', 'nome_retirou', 'projeto_nome', 'data_hora']].head(20).to_string(index=False) if not df_hist_ctx.empty else "Nenhum histórico"
         
         FOX_SYSTEM_INSTRUCTION_DINAMICO = f"""
 Você é a Fox Assistente, a inteligência virtual simpática e especialista do Sistema de Almoxarifado! 🦊✨
-
-Sua missão é responder perguntas operacionais, de BI, estoque, custos, obras e concorrência de fornecedores de forma direta, analítica e precisa.
-
+### VISÃO GERAL DAS OPERAÇÕES DO SISTEMA:
+1. **Consulta de Estoque:** Exibe produtos, quantidades, localizações e avisa quando itens estão com nível crítico ou zerados.
+2. **Pedidos de Compras:** Gera automaticamente listas de reposição com sugestão de compra em Excel.
+3. **Gestão de Projetos e Equipe:** Permite cadastrar obras/projetos e atribuir colaboradores para rastrear o uso dos materiais.
+4. **Checklist de Ferramentas:** Ferramenta diária para fiscalizar o estado operacional de ferramentas e gerar relatórios em PDF.
+5. **Retirada / Devolução:** Registra saída/entrada de materiais exigindo obrigatoriamente o Nome de quem retirou, Projeto e responsável por EPI.
+6. **Entrada de NF:** Importa arquivos XML de NFe ou faz lançamentos manuais com atualização instantânea de saldo e preço.
+7. **Dashboard Analytics (BI):** Apresenta comparativos de gastos por período (até 12 meses), levantamento de custos por projeto e ranking dos top 10 itens retirados.
+8. **Histórico e Retenção:** Guarda histórico completo com limpeza automática de registros superiores a 18 meses.
 ---
-### EXEMPLOS DE PERGUNTAS FREQUENTES E COMO VOCÊ DEVE RESPONDER:
-
-1. **"Fox, quais materiais preciso comprar essa semana?"**
-   -> Analise a lista de produtos com estoque zerado ou abaixo/igual à 'qtd_minima' e liste priorizando os zerados.
-
-2. **"Qual fornecedor vendeu cabo 2,5 mm mais barato nos últimos seis meses?"**
-   -> Consulte a Tabela de Preços e Compras (NFs) filtrando por datas dos últimos 6 meses e buscando o menor 'valor_unitario' para o item.
-
-3. **"Qual obra consumiu mais material este mês?"**
-   -> Consulte o Consumo por Projeto/Obra do mês atual e identifique qual teve o maior volume total de itens retirados.
-
-4. **"Quais EPIs estão próximos de acabar?"**
-   -> Filtre os produtos que contêm 'EPI' na categoria/nome e estão com saldo <= qtd_minima.
-
-5. **"Qual foi o custo aproximado do projeto X?"**
-   -> Cruze as retiradas do Projeto X com os valores unitários mais recentes das NFs para estimar o custo total dos materiais consumidos.
-
-6. **"Quais materiais tiveram aumento de preço acima de 15%?"**
-   -> Compare o valor_unitario da compra mais recente com a compra anterior do mesmo produto na Tabela de Compras/NFs.
-
-7. **"Existe alguma retirada fora do padrão?"**
-   -> Verifique retiradas com quantidades atipicamente elevadas em um único registro ou retiradas sem projeto/sem responsável.
----
-
-### DADOS ATUALIZADOS EM TEMPO REAL DO ALMOXARIFADO:
-
-**1. PRODUTOS E SALDOS ATUAIS:**
+### TABELAS E DADOS EM TEMPO REAL DO ALMOXARIFADO (USE PARA COMPARAR PREÇOS E DAR SUGESTÕES DE BI):
+**1. TABELA DE PRODUTOS E ESTOQUE:**
 {resumo_produtos}
-
-**2. ITENS EM NÍVEL CRÍTICO / REPOSIÇÃO (COMPRAS):**
-{resumo_faltantes}
-
-**3. HISTÓRICO DE NOTAS FISCAIS E PREÇOS P/ UNIDADE (ÚLTIMOS MESES):**
+**2. TABELA DE PREÇOS E NOTAS FISCAIS (COMPRAS):**
 {resumo_precos}
-
-**4. CONSUMO CONSOLIDADO POR PROJETO/OBRA:**
-{resumo_projetos}
-
-**5. ÚLTIMAS RETIRADAS DE ESTOQUE:**
+**3. ÚLTIMAS RETIRADAS E PROJETOS:**
 {resumo_saidas}
+---
+Sua missão:
+- Responder às dúvidas dos usuários com clareza e empatia.
+- Ler os dados de preços fornecidos acima para fazer comparativos de custos e sugerir economias.
+- Explicar métricas e indicar insights para o BI.
 """
+        # Controles Multimídia (Voz e Imagem)
+        col_midia1, col_midia2 = st.columns([1, 1])
+        with col_midia1:
+            audio_input = st.audio_input("🎙️ Enviar pergunta por voz:")
+        with col_midia2:
+            img_input = st.file_uploader("📷 Enviar imagem para análise:", type=["jpg", "jpeg", "png", "webp"])
+            
+        # Exibição do Histórico do Chat
         for msg in st.session_state.chat_history:
             avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
             with st.chat_message(msg["role"], avatar=avatar_icon):
                 st.markdown(msg["content"])
+                if "audio_bytes" in msg and msg["audio_bytes"]:
+                    st.audio(msg["audio_bytes"], format="audio/mp3")
 
-        if prompt := st.chat_input("Pergunte sobre preços, produtos, projetos ou relatórios do BI:"):
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.chat_message("user", avatar="👤"):
-                st.markdown(prompt)
+        prompt = st.chat_input("Pergunte sobre preços, produtos, projetos ou relatórios do BI:")
+        
+        if prompt or audio_input or img_input:
+            conteudo_envio = [FOX_SYSTEM_INSTRUCTION_DINAMICO]
+            texto_usuario = prompt if prompt else ""
+            
+            if audio_input:
+                audio_bytes = audio_input.read()
+                conteudo_envio.append(types.Part.from_bytes(data=audio_bytes, mime_type=audio_input.type))
+                if not texto_usuario:
+                    texto_usuario = "🎤 [Áudio enviado para processamento]"
+                    
+            if img_input:
+                img_bytes = img_input.read()
+                conteudo_envio.append(types.Part.from_bytes(data=img_bytes, mime_type=img_input.type))
+                if not prompt and not audio_input:
+                    texto_usuario = "📷 [Imagem enviada para análise]"
+
+            if texto_usuario:
+                conteudo_envio.append(f"Pergunta do usuário: {texto_usuario}")
+                st.session_state.chat_history.append({"role": "user", "content": texto_usuario})
+                with st.chat_message("user", avatar="👤"):
+                    st.markdown(texto_usuario)
+                    if img_input:
+                        st.image(img_input, width=250)
                 
             try:
-                conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION_DINAMICO}\n\nPergunta do usuário: {prompt}"
-                
+                # 1. Geração da resposta textual usando Gemini 2.5
                 response = client_gemini.models.generate_content(
-                    model="gemini-3.6-flash",
+                    model="gemini-2.5-flash",
                     contents=conteudo_envio,
                 )
                 
-                resposta = response.text
-                st.session_state.chat_history.append({"role": "assistant", "content": resposta})
+                resposta_texto = response.text
+                
+                # 2. Geração de resposta em Áudio (Voz) com Gemini 2.5 Flash
+                audio_gerado_bytes = None
+                try:
+                    response_audio = client_gemini.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=f"Leia o seguinte texto de forma clara, amigável e natural como a Fox Assistente: {resposta_texto}",
+                        config=types.GenerateContentConfig(
+                            response_mime_type="audio/mp3"
+                        )
+                    )
+                    if response_audio.candidates and response_audio.candidates[0].content.parts:
+                        for part in response_audio.candidates[0].content.parts:
+                            if part.inline_data:
+                                audio_gerado_bytes = part.inline_data.data
+                except Exception:
+                    pass  # Fallback suave caso haja falha ou indisponibilidade na síntese de áudio
+
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": resposta_texto,
+                    "audio_bytes": audio_gerado_bytes
+                })
+                
                 with st.chat_message("assistant", avatar="🦊"):
-                    st.markdown(resposta)
+                    st.markdown(resposta_texto)
+                    if audio_gerado_bytes:
+                        st.audio(audio_gerado_bytes, format="audio/mp3")
+                        
             except Exception as e:
                 st.error(f"Erro ao conversar com a Fox Assistente: {e}")
