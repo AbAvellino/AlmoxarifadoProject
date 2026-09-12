@@ -28,8 +28,8 @@ hide_streamlit_style = """
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# Pastas para salvamento temporário e relatorios
-for pasta in ["uploads", "relatorios_checklist"]:
+# Pastas para salvamento temporário, relatórios e biblioteca
+for pasta in ["uploads", "relatorios_checklist", "biblioteca_pdf"]:
     if not os.path.exists(pasta):
         os.makedirs(pasta)
 
@@ -62,6 +62,7 @@ def verificar_senha(senha_digitada: str, hash_armazenado: str) -> bool:
 EXTENSOES_PERMITIDAS_IMAGEM = {".jpg", ".jpeg", ".png", ".webp"}
 EXTENSOES_PERMITIDAS_XML = {".xml"}
 EXTENSOES_PERMITIDAS_MAPA = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".xlsx", ".xls"}
+EXTENSOES_PERMITIDAS_PDF = {".pdf"}
 
 def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem") -> str:
     if uploaded_file is None:
@@ -73,8 +74,11 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
         permitidas = EXTENSOES_PERMITIDAS_XML
     elif tipo == "mapa":
         permitidas = EXTENSOES_PERMITIDAS_MAPA
+    elif tipo == "pdf":
+        permitidas = EXTENSOES_PERMITIDAS_PDF
     else:
         permitidas = EXTENSOES_PERMITIDAS_IMAGEM
+
     if ext not in permitidas:
         raise ValueError(f"Extensão não permitida: {ext}")
     novo_nome = f"{uuid.uuid4().hex}{ext}"
@@ -201,6 +205,7 @@ def inicializar_banco():
                 status TEXT DEFAULT 'Ativo'
             );
             """)
+            
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS equipe_projeto (
                 id SERIAL PRIMARY KEY,
@@ -209,6 +214,7 @@ def inicializar_banco():
                 funcao TEXT DEFAULT 'Operador'
             );
             """)
+            
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS historico (
                 id SERIAL PRIMARY KEY,
@@ -222,12 +228,26 @@ def inicializar_banco():
                 data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS biblioteca_projetos (
+                id SERIAL PRIMARY KEY,
+                titulo TEXT NOT NULL,
+                descricao TEXT DEFAULT '',
+                projeto_id INTEGER REFERENCES projetos (id) ON DELETE SET NULL,
+                nome_arquivo_original TEXT DEFAULT '',
+                pdf_path TEXT NOT NULL,
+                data_upload TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                usuario TEXT DEFAULT 'Sistema'
+            );
+            """)
             
             try:
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS nome_retirou TEXT DEFAULT '';")
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS projeto_nome TEXT DEFAULT '';")
             except Exception:
                 pass
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -490,6 +510,81 @@ def adicionar_membro_equipe(projeto_id, nome_colaborador, funcao="Operador"):
         conn.rollback()
         return False, f"Erro ao vincular membro: {e}"
 
+# --- MÓDULO DA BIBLIOTECA DE PROJETOS (PDFs) ---
+@st.cache_data(ttl=15)
+def buscar_biblioteca_projetos():
+    conn = conectar()
+    return pd.read_sql_query("""
+    SELECT b.id, b.titulo, b.descricao, b.projeto_id, p.nome_projeto, b.nome_arquivo_original, b.pdf_path, b.data_upload, b.usuario
+    FROM biblioteca_projetos b
+    LEFT JOIN projetos p ON b.projeto_id = p.id
+    ORDER BY b.id DESC
+    """, conn)
+
+def cadastrar_desenho_projeto(titulo, descricao, projeto_id, nome_arquivo_orig, pdf_path, usuario):
+    conn = conectar()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+            INSERT INTO biblioteca_projetos (titulo, descricao, projeto_id, nome_arquivo_original, pdf_path, usuario)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """, (titulo.strip(), descricao.strip(), projeto_id, nome_arquivo_orig, pdf_path, usuario))
+            conn.commit()
+            st.cache_data.clear()
+            return True, "Desenho/Projeto cadastrado na biblioteca com sucesso!"
+    except Exception as e:
+        conn.rollback()
+        return False, f"Erro ao cadastrar item na biblioteca: {e}"
+
+def editar_desenho_projeto(id_item, titulo, descricao, projeto_id, novo_pdf_path=None, novo_nome_orig=None):
+    conn = conectar()
+    try:
+        with conn.cursor() as cursor:
+            if novo_pdf_path:
+                cursor.execute("SELECT pdf_path FROM biblioteca_projetos WHERE id = %s", (id_item,))
+                res = cursor.fetchone()
+                if res and res[0] and os.path.exists(res[0]):
+                    try:
+                        os.remove(res[0])
+                    except Exception:
+                        pass
+                cursor.execute("""
+                UPDATE biblioteca_projetos 
+                SET titulo = %s, descricao = %s, projeto_id = %s, pdf_path = %s, nome_arquivo_original = %s 
+                WHERE id = %s
+                """, (titulo.strip(), descricao.strip(), projeto_id, novo_pdf_path, novo_nome_orig, id_item))
+            else:
+                cursor.execute("""
+                UPDATE biblioteca_projetos 
+                SET titulo = %s, descricao = %s, projeto_id = %s 
+                WHERE id = %s
+                """, (titulo.strip(), descricao.strip(), projeto_id, id_item))
+            conn.commit()
+            st.cache_data.clear()
+            return True, "Anexo de desenho/projeto alterado com sucesso!"
+    except Exception as e:
+        conn.rollback()
+        return False, f"Erro ao editar item: {e}"
+
+def excluir_desenho_projeto(id_item):
+    conn = conectar()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT pdf_path FROM biblioteca_projetos WHERE id = %s", (id_item,))
+            res = cursor.fetchone()
+            if res and res[0] and os.path.exists(res[0]):
+                try:
+                    os.remove(res[0])
+                except Exception:
+                    pass
+            cursor.execute("DELETE FROM biblioteca_projetos WHERE id = %s", (id_item,))
+            conn.commit()
+            st.cache_data.clear()
+            return True, "Item excluído da biblioteca com sucesso!"
+    except Exception as e:
+        conn.rollback()
+        return False, f"Erro ao excluir item: {e}"
+
 def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, usuario_logado, categoria="Geral", localizacao="Almoxarifado Principal"):
     valor_total = qtd_mov * valor_unit
     conn = conectar()
@@ -670,6 +765,7 @@ if st.session_state.perfil == "Operador":
         "📦 Consulta de Estoque",
         "🛒 Pedidos de Compras (Itens Faltantes)",
         "🏗️ Gestão de Projetos e Equipe",
+        "📁 Biblioteca de Desenhos / Projetos",
         "🔄 Retirada / Devolução de Materiais",
         "➕ Cadastrar Produto",
         "🦊 Fox Assistente"
@@ -679,6 +775,7 @@ else:
         "📦 Consulta de Estoque",
         "🛒 Pedidos de Compras (Itens Faltantes)",
         "🏗️ Gestão de Projetos e Equipe",
+        "📁 Biblioteca de Desenhos / Projetos",
         "📋 Checklist de Ferramentas",
         "🔄 Retirada / Devolução de Materiais",
         "➕ Cadastrar Produto",
@@ -909,6 +1006,7 @@ elif "Gestão de Projetos" in opcao:
         st.write("---")
         st.subheader("📋 Lista de Projetos Registrados")
         st.dataframe(df_proj, use_container_width=True)
+
     with tab_eq:
         st.subheader("👤 Adicionar Colaborador ao Projeto")
         if df_proj.empty:
@@ -932,6 +1030,168 @@ elif "Gestão de Projetos" in opcao:
             st.write("---")
             st.subheader("👥 Quadro de Colaboradores por Projeto")
             st.dataframe(df_eq, use_container_width=True)
+
+# --- ABA: BIBLIOTECA DE DESENHOS / PROJETOS ---
+elif "Biblioteca de Desenhos" in opcao:
+    st.title("📁 Biblioteca de Desenhos e Projetos (PDF)")
+    st.caption("Anexe e gerencie plantas, desenhos técnicos e documentos em PDF associados aos projetos.")
+
+    df_bib = buscar_biblioteca_projetos()
+    df_proj = buscar_projetos()
+
+    tab_consultar, tab_anexar = st.tabs(["🔍 Consultar / Gerenciar Desenhos", "➕ Anexar Novo Desenho / Projeto (PDF)"])
+
+    with tab_consultar:
+        if df_bib.empty:
+            st.info("Nenhum desenho ou projeto em PDF foi anexado até o momento.")
+        else:
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                filtro_busca_pdf = st.text_input("🔎 Buscar por Título ou Descrição:")
+            with col_f2:
+                lista_proj_filtro = ["Todos os Projetos"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
+                filtro_proj_pdf = st.selectbox("📌 Filtrar por Projeto:", lista_proj_filtro)
+
+            df_exibir_pdf = df_bib.copy()
+            if filtro_busca_pdf.strip():
+                df_exibir_pdf = df_exibir_pdf[
+                    df_exibir_pdf['titulo'].str.contains(filtro_busca_pdf, case=False, na=False) |
+                    df_exibir_pdf['descricao'].str.contains(filtro_busca_pdf, case=False, na=False)
+                ]
+            if filtro_proj_pdf != "Todos os Projetos":
+                df_exibir_pdf = df_exibir_pdf[df_exibir_pdf['nome_projeto'] == filtro_proj_pdf]
+
+            st.write("---")
+            st.subheader(f"📑 Desenhos Encontrados ({len(df_exibir_pdf)})")
+
+            for _, row_pdf in df_exibir_pdf.iterrows():
+                with st.expander(f"📄 #{row_pdf['id']} - {row_pdf['titulo']} ({row_pdf['nome_projeto'] or 'Sem Projeto'})"):
+                    c_det1, c_det2 = st.columns([3, 1])
+                    with c_det1:
+                        st.write(f"**Descrição:** {row_pdf['descricao'] or 'Sem descrição'}")
+                        st.write(f"**Arquivo Original:** `{row_pdf['nome_arquivo_original']}`")
+                        st.write(f"**Data de Upload:** {row_pdf['data_upload']} | **Enviado por:** {row_pdf['usuario']}")
+
+                        if os.path.exists(row_pdf['pdf_path']):
+                            with open(row_pdf['pdf_path'], "rb") as pdf_f:
+                                bytes_pdf = pdf_f.read()
+                            st.download_button(
+                                label="⬇️ Baixar PDF",
+                                data=bytes_pdf,
+                                file_name=row_pdf['nome_arquivo_original'] or "projeto.pdf",
+                                mime="application/pdf",
+                                key=f"dl_pdf_{row_pdf['id']}"
+                            )
+                        else:
+                            st.error("⚠️ O arquivo físico em PDF não foi encontrado no servidor.")
+
+                    with c_det2:
+                        st.markdown("**Ações do Item:**")
+                        # ALTERAÇÃO DO ITEM
+                        if st.button("✏️ Alterar", key=f"btn_alt_{row_pdf['id']}"):
+                            st.session_state[f"edit_mode_{row_pdf['id']}"] = True
+
+                        # EXCLUSÃO DO ITEM
+                        if st.button("🗑️ Excluir", key=f"btn_exc_{row_pdf['id']}", type="secondary"):
+                            st.session_state[f"del_mode_{row_pdf['id']}"] = True
+
+                    # FORMULÁRIO DE EDIÇÃO (QUANDO ATIVADO)
+                    if st.session_state.get(f"edit_mode_{row_pdf['id']}", False):
+                        st.warning(f"✏️ Editando Item #{row_pdf['id']}")
+                        with st.form(key=f"form_edit_pdf_{row_pdf['id']}"):
+                            edit_tit = st.text_input("Título", value=row_pdf['titulo'])
+                            edit_desc = st.text_area("Descrição", value=row_pdf['descricao'])
+                            
+                            p_opts = [None] + (df_proj['id'].tolist() if not df_proj.empty else [])
+                            idx_p = p_opts.index(row_pdf['projeto_id']) if row_pdf['projeto_id'] in p_opts else 0
+                            edit_proj_id = st.selectbox(
+                                "Projeto Associado", 
+                                p_opts, 
+                                index=idx_p,
+                                format_func=lambda x: "Sem Projeto Viculado" if x is None else df_proj[df_proj['id']==x]['nome_projeto'].values[0]
+                            )
+                            
+                            novo_pdf_up = st.file_uploader("Substituir Arquivo PDF (Opcional)", type=["pdf"], key=f"up_edit_{row_pdf['id']}")
+                            
+                            col_f_btn1, col_f_btn2 = st.columns(2)
+                            with col_f_btn1:
+                                sub_edit = st.form_submit_button("💾 Salvar Alterações", type="primary")
+                            with col_f_btn2:
+                                sub_canc = st.form_submit_button("❌ Cancelar")
+
+                            if sub_edit:
+                                n_path, n_orig = None, None
+                                if novo_pdf_up is not None:
+                                    n_path = salvar_arquivo_seguro(novo_pdf_up, pasta_destino="biblioteca_pdf", tipo="pdf")
+                                    n_orig = novo_pdf_up.name
+
+                                ok, msg = editar_desenho_projeto(row_pdf['id'], edit_tit, edit_desc, edit_proj_id, n_path, n_orig)
+                                if ok:
+                                    st.success(msg)
+                                    st.session_state[f"edit_mode_{row_pdf['id']}"] = False
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                            elif sub_canc:
+                                st.session_state[f"edit_mode_{row_pdf['id']}"] = False
+                                st.rerun()
+
+                    # CONFIRMAÇÃO DE EXCLUSÃO (QUANDO ATIVADA)
+                    if st.session_state.get(f"del_mode_{row_pdf['id']}", False):
+                        st.error(f"⚠️ Tem certeza que deseja excluir o anexo '{row_pdf['titulo']}'?")
+                        c_del_sim, c_del_nao = st.columns(2)
+                        with c_del_sim:
+                            if st.button("🔴 Sim, Confirmar Exclusão", key=f"conf_del_sim_{row_pdf['id']}"):
+                                ok, msg = excluir_desenho_projeto(row_pdf['id'])
+                                if ok:
+                                    st.success(msg)
+                                    st.session_state[f"del_mode_{row_pdf['id']}"] = False
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        with c_del_nao:
+                            if st.button("🟢 Cancelar", key=f"conf_del_nao_{row_pdf['id']}"):
+                                st.session_state[f"del_mode_{row_pdf['id']}"] = False
+                                st.rerun()
+
+    with tab_anexar:
+        st.subheader("➕ Anexar Novo Arquivo PDF à Biblioteca")
+        with st.form("form_novo_pdf_bib", clear_on_submit=True):
+            f_titulo = st.text_input("Título do Desenho / Projeto *", placeholder="Ex: Planta Elétrica Galpão 02 - Rev 03")
+            f_desc = st.text_area("Descrição / Notas Técnicas", placeholder="Ex: Desenho aprovado com especificações de calhas e condutores")
+            
+            p_opts_cad = [None] + (df_proj['id'].tolist() if not df_proj.empty else [])
+            f_proj_id = st.selectbox(
+                "Vincular a um Projeto (Opcional):", 
+                p_opts_cad, 
+                format_func=lambda x: "Sem Projeto Vinculado" if x is None else df_proj[df_proj['id']==x]['nome_projeto'].values[0]
+            )
+            
+            f_file = st.file_uploader("Selecione o arquivo PDF *", type=["pdf"])
+            
+            if st.form_submit_button("📤 Salvar e Anexar na Biblioteca", type="primary"):
+                if not f_titulo.strip():
+                    st.warning("⚠️ O título do desenho/projeto é obrigatório.")
+                elif f_file is None:
+                    st.warning("⚠️ Por favor, selecione um arquivo em formato PDF.")
+                else:
+                    try:
+                        caminho_salvo = salvar_arquivo_seguro(f_file, pasta_destino="biblioteca_pdf", tipo="pdf")
+                        ok, msg = cadastrar_desenho_projeto(
+                            f_titulo,
+                            f_desc,
+                            f_proj_id,
+                            f_file.name,
+                            caminho_salvo,
+                            st.session_state.usuario
+                        )
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    except Exception as e:
+                        st.error(f"Erro ao processar o arquivo: {e}")
 
 # --- ABA 2: CHECKLIST DE FERRAMENTAS ---
 elif "Checklist de Ferramentas" in opcao:
@@ -1286,7 +1546,7 @@ elif "Dashboard Analytics" in opcao:
     df_hist = buscar_historico()
     df_nf = buscar_notas_fiscais()
     df_proj = buscar_projetos()
-    
+
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     with kpi1:
         st.metric("Total de Produtos", len(df_prod))
@@ -1305,6 +1565,7 @@ elif "Dashboard Analytics" in opcao:
         else:
             projetos_7d = 0
         st.metric("Projetos Ativos (Últimos 7 Dias)", projetos_7d)
+
     st.write("---")
     st.subheader("🏗️ Levantamento e Consumo por Projeto")
     if not df_hist.empty:
@@ -1324,6 +1585,7 @@ elif "Dashboard Analytics" in opcao:
             st.info("Nenhuma saída vinculada a projetos no histórico.")
     else:
         st.info("Sem dados de histórico de retiradas.")
+
     st.write("---")
     st.subheader("💰 Análise Financeira de Gastos e Comparação por Períodos")
     if not df_nf.empty:
@@ -1499,11 +1761,12 @@ Você é a Fox Assistente, a inteligência virtual simpática e especialista do 
 1. **Consulta de Estoque:** Exibe produtos, quantidades, localizações e avisa quando itens estão com nível crítico ou zerados.
 2. **Pedidos de Compras:** Gera automaticamente listas de reposição com sugestão de compra em Excel.
 3. **Gestão de Projetos e Equipe:** Permite cadastrar obras/projetos e atribuir colaboradores para rastrear o uso dos materiais.
-4. **Checklist de Ferramentas:** Ferramenta diária para fiscalizar o estado operacional de ferramentas e gerar relatórios em PDF.
-5. **Retirada / Devolução:** Registra saída/entrada de materiais exigindo obrigatoriamente o Nome de quem retirou, Projeto e responsável por EPI.
-6. **Entrada de NF:** Importa arquivos XML de NFe ou faz lançamentos manuais com atualização instantânea de saldo e preço.
-7. **Dashboard Analytics (BI):** Apresenta comparativos de gastos por período (até 12 meses), levantamento de custos por projeto e ranking dos top 10 itens retirados.
-8. **Histórico e Retenção:** Guarda histórico completo com limpeza automática de registros superiores a 18 meses.
+4. **Biblioteca de Desenhos / Projetos:** Anexa, consulta, altera e remove plantas e projetos em PDF.
+5. **Checklist de Ferramentas:** Ferramenta diária para fiscalizar o estado operacional de ferramentas e gerar relatórios em PDF.
+6. **Retirada / Devolução:** Registra saída/entrada de materiais exigindo obrigatoriamente o Nome de quem retirou, Projeto e responsável por EPI.
+7. **Entrada de NF:** Importa arquivos XML de NFe ou faz lançamentos manuais com atualização instantânea de saldo e preço.
+8. **Dashboard Analytics (BI):** Apresenta comparativos de gastos por período (até 12 meses), levantamento de custos por projeto e ranking dos top 10 itens retirados.
+9. **Histórico e Retenção:** Guarda histórico completo com limpeza automática de registros superiores a 18 meses.
 ---
 ### TABELAS E DADOS EM TEMPO REAL DO ALMOXARIFADO (USE PARA COMPARAR PREÇOS E DAR SUGESTÕES DE BI):
 **1. TABELA DE PRODUTOS E ESTOQUE:**
@@ -1522,6 +1785,7 @@ Sua missão:
             avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
             with st.chat_message(msg["role"], avatar=avatar_icon):
                 st.markdown(msg["content"])
+
         if prompt := st.chat_input("Pergunte sobre preços, produtos, projetos ou relatórios do BI:"):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user", avatar="👤"):
@@ -1530,7 +1794,7 @@ Sua missão:
             try:
                 conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION_DINAMICO}\n\nPergunta do usuário: {prompt}"
                 
-                # NOME DO MODELO CORRIGIDO PARA EVITAR ERRO DE 404 NOT_FOUND
+                # MODELO ATUALIZADO SOLICITADO PELA API
                 response = client_gemini.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=conteudo_envio,
