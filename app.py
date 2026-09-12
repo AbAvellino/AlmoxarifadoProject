@@ -9,7 +9,6 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from fpdf import FPDF
 from google import genai
-from google.genai import types
 import matplotlib.pyplot as plt
 import pandas as pd
 import psycopg2
@@ -76,10 +75,8 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
         permitidas = EXTENSOES_PERMITIDAS_MAPA
     else:
         permitidas = EXTENSOES_PERMITIDAS_IMAGEM
-
     if ext not in permitidas:
         raise ValueError(f"Extensão não permitida: {ext}")
-
     novo_nome = f"{uuid.uuid4().hex}{ext}"
     caminho_completo = os.path.join(pasta_destino, novo_nome)
     with open(caminho_completo, "wb") as f:
@@ -226,7 +223,6 @@ def inicializar_banco():
             );
             """)
             
-            # Garantir colunas no histórico caso a tabela já existisse antes
             try:
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS nome_retirou TEXT DEFAULT '';")
                 cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS projeto_nome TEXT DEFAULT '';")
@@ -269,7 +265,6 @@ def inicializar_banco():
             );
             """)
             
-            # Executar Limpeza Automática de Histórico com mais de 18 meses (540 dias)
             cursor.execute("DELETE FROM historico WHERE data_hora < NOW() - INTERVAL '540 days';")
             cursor.execute("SELECT COUNT(*) FROM usuarios")
             if cursor.fetchone()[0] == 0:
@@ -701,7 +696,6 @@ st.sidebar.title(f"🏢 {config['nome_empresa']}")
 st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
 if config['logo_path'] and os.path.exists(config['logo_path']):
     st.sidebar.image(config['logo_path'], use_container_width=True)
-
 if config['mapa_path'] and os.path.exists(config['mapa_path']):
     st.sidebar.write("---")
     st.sidebar.subheader("🗺️ Layout/Mapa")
@@ -915,7 +909,6 @@ elif "Gestão de Projetos" in opcao:
         st.write("---")
         st.subheader("📋 Lista de Projetos Registrados")
         st.dataframe(df_proj, use_container_width=True)
-
     with tab_eq:
         st.subheader("👤 Adicionar Colaborador ao Projeto")
         if df_proj.empty:
@@ -952,7 +945,6 @@ elif "Checklist de Ferramentas" in opcao:
         df_ferramentas = df_prod[filtro_incluir & filtro_excluir_epi]
     else:
         df_ferramentas = pd.DataFrame()
-
     if df_ferramentas.empty:
         st.warning("Nenhuma ferramenta/equipamento cadastrado.")
     else:
@@ -1038,11 +1030,9 @@ elif "Retirada / Devolução" in opcao:
         with col2:
             st.write("📋 **Destinação e Responsável:**")
             
-            # Opção de Selecionar Projeto
             lista_projetos = ["Geral / Sem Projeto Específico"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
             projeto_selecionado = st.selectbox("🏗️ Projeto Destino:", lista_projetos)
             
-            # Opção de Selecionar Quem Retirou (Filtra colaboradores do projeto se houver)
             colaboradores_sugeridos = []
             if projeto_selecionado != "Geral / Sem Projeto Específico" and not df_eq.empty:
                 colaboradores_sugeridos = df_eq[df_eq['nome_projeto'] == projeto_selecionado]['nome_colaborador'].tolist()
@@ -1296,7 +1286,7 @@ elif "Dashboard Analytics" in opcao:
     df_hist = buscar_historico()
     df_nf = buscar_notas_fiscais()
     df_proj = buscar_projetos()
-    # MÉTRICAS GERAIS E INTELIGÊNCIA POR PROJETO
+    
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     with kpi1:
         st.metric("Total de Produtos", len(df_prod))
@@ -1307,7 +1297,6 @@ elif "Dashboard Analytics" in opcao:
         total_retiradas = len(df_hist[df_hist['tipo'] == 'SAÍDA']) if not df_hist.empty else 0
         st.metric("Total de Retiradas", total_retiradas)
     with kpi4:
-        # PROJETOS ATIVOS NOS ÚLTIMOS 7 DIAS
         if not df_hist.empty:
             df_hist['data_hora'] = pd.to_datetime(df_hist['data_hora'])
             sete_dias_atras = datetime.now() - timedelta(days=7)
@@ -1487,8 +1476,8 @@ elif "Personalizar Empresa" in opcao and st.session_state.perfil == "Admin":
 
 # --- ABA 12: FOX ASSISTENTE (GEMINI AI COM ACESSO AOS DADOS DO BANCO) ---
 elif "Fox Assistente" in opcao:
-    st.title("🦊 Fox Assistente - Almoxarifado Inteligente Multimodal")
-    st.caption("Sua assistente integrada que lê o banco de dados, analisa fotos, responde por voz e tira dúvidas!")
+    st.title("🦊 Fox Assistente - Almoxarifado Inteligente")
+    st.caption("Sua assistente integrada que lê o banco de dados, compara preços, analisa BI e tira dúvidas!")
     
     if not client_gemini:
         st.error("Chave de API do Gemini não configurada em .streamlit/secrets.toml (GEMINI_API_KEY).")
@@ -1496,7 +1485,6 @@ elif "Fox Assistente" in opcao:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
             
-        # BUSCAR CONTEXTO ATUAL DO BANCO PARA O ASSISTENTE LER PREÇOS E TABELAS
         df_p_ctx = buscar_produtos()
         df_nf_ctx = buscar_notas_fiscais()
         df_hist_ctx = buscar_historico()
@@ -1530,83 +1518,27 @@ Sua missão:
 - Ler os dados de preços fornecidos acima para fazer comparativos de custos e sugerir economias.
 - Explicar métricas e indicar insights para o BI.
 """
-        # Controles Multimídia (Voz e Imagem)
-        col_midia1, col_midia2 = st.columns([1, 1])
-        with col_midia1:
-            audio_input = st.audio_input("🎙️ Enviar pergunta por voz:")
-        with col_midia2:
-            img_input = st.file_uploader("📷 Enviar imagem para análise:", type=["jpg", "jpeg", "png", "webp"])
-            
-        # Exibição do Histórico do Chat
         for msg in st.session_state.chat_history:
             avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
             with st.chat_message(msg["role"], avatar=avatar_icon):
                 st.markdown(msg["content"])
-                if "audio_bytes" in msg and msg["audio_bytes"]:
-                    st.audio(msg["audio_bytes"], format="audio/mp3")
-
-        prompt = st.chat_input("Pergunte sobre preços, produtos, projetos ou relatórios do BI:")
-        
-        if prompt or audio_input or img_input:
-            conteudo_envio = [FOX_SYSTEM_INSTRUCTION_DINAMICO]
-            texto_usuario = prompt if prompt else ""
-            
-            if audio_input:
-                audio_bytes = audio_input.read()
-                conteudo_envio.append(types.Part.from_bytes(data=audio_bytes, mime_type=audio_input.type))
-                if not texto_usuario:
-                    texto_usuario = "🎤 [Áudio enviado para processamento]"
-                    
-            if img_input:
-                img_bytes = img_input.read()
-                conteudo_envio.append(types.Part.from_bytes(data=img_bytes, mime_type=img_input.type))
-                if not prompt and not audio_input:
-                    texto_usuario = "📷 [Imagem enviada para análise]"
-
-            if texto_usuario:
-                conteudo_envio.append(f"Pergunta do usuário: {texto_usuario}")
-                st.session_state.chat_history.append({"role": "user", "content": texto_usuario})
-                with st.chat_message("user", avatar="👤"):
-                    st.markdown(texto_usuario)
-                    if img_input:
-                        st.image(img_input, width=250)
+        if prompt := st.chat_input("Pergunte sobre preços, produtos, projetos ou relatórios do BI:"):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(prompt)
                 
             try:
-                # 1. Geração da resposta textual usando Gemini 2.5
+                conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION_DINAMICO}\n\nPergunta do usuário: {prompt}"
+                
+                # NOME DO MODELO CORRIGIDO PARA EVITAR ERRO DE 404 NOT_FOUND
                 response = client_gemini.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=conteudo_envio,
                 )
                 
-                resposta_texto = response.text
-                
-                # 2. Geração de resposta em Áudio (Voz) com Gemini 2.5 Flash
-                audio_gerado_bytes = None
-                try:
-                    response_audio = client_gemini.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=f"Leia o seguinte texto de forma clara, amigável e natural como a Fox Assistente: {resposta_texto}",
-                        config=types.GenerateContentConfig(
-                            response_mime_type="audio/mp3"
-                        )
-                    )
-                    if response_audio.candidates and response_audio.candidates[0].content.parts:
-                        for part in response_audio.candidates[0].content.parts:
-                            if part.inline_data:
-                                audio_gerado_bytes = part.inline_data.data
-                except Exception:
-                    pass  # Fallback suave caso haja falha ou indisponibilidade na síntese de áudio
-
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": resposta_texto,
-                    "audio_bytes": audio_gerado_bytes
-                })
-                
+                resposta = response.text
+                st.session_state.chat_history.append({"role": "assistant", "content": resposta})
                 with st.chat_message("assistant", avatar="🦊"):
-                    st.markdown(resposta_texto)
-                    if audio_gerado_bytes:
-                        st.audio(audio_gerado_bytes, format="audio/mp3")
-                        
+                    st.markdown(resposta)
             except Exception as e:
                 st.error(f"Erro ao conversar com a Fox Assistente: {e}")
