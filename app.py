@@ -7,17 +7,21 @@ import re
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from typing import List, Dict, Tuple, Any, Optional
+
 from fpdf import FPDF
 from google import genai
 import matplotlib.pyplot as plt
 import pandas as pd
 import psycopg2
+import psycopg2.extensions
 import streamlit as st
 
-# Configuração da página Streamlit
+# ==============================================================================
+# 0. CONFIGURAÇÕES E ESTILOS STREAMLIT
+# ==============================================================================
 st.set_page_config(page_title="Sistema de Almoxarifado Inteligente", layout="wide", page_icon="🦊")
 
-# --- CSS AJUSTADO: PERMITE REABRIR O MENU LATERAL SE OCULTADO ---
 hide_streamlit_style = """
     <style>
     #MainMenu {visibility: hidden;}
@@ -27,26 +31,37 @@ hide_streamlit_style = """
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# Pastas para salvamento temporário, relatórios e biblioteca
 for pasta in ["uploads", "relatorios_checklist", "biblioteca_pdf"]:
     if not os.path.exists(pasta):
         os.makedirs(pasta)
 
-# --- INICIALIZAÇÃO DA API DO GEMINI (FOX ASSISTENTE) ---
-@st.cache_resource
-def init_gemini():
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key:
-        return None
-    return genai.Client(api_key=api_key)
 
-client_gemini = init_gemini()
+# ==============================================================================
+# 1. EXCEÇÕES E PADRONIZAÇÃO DE ERROS (UTILS)
+# ==============================================================================
+class AppError(Exception):
+    """Exceção customizada padronizada para erros de negócio do aplicativo."""
+    def __init__(self, message: str, code: str = "ERROR"):
+        self.message = message
+        self.code = code
+        super().__init__(self.message)
 
-# --- MÓDULO DE SEGURANÇA E ARQUIVOS ---
+
+def tratar_erro(e: Exception) -> str:
+    """Padroniza e formata mensagens de erro para exibição no Streamlit."""
+    if isinstance(e, AppError):
+        return f"⚠️ [{e.code}] {e.message}"
+    elif isinstance(e, psycopg2.Error):
+        return f"❌ [ERRO_BANCO] Falha na operação de banco de dados: {str(e)}"
+    else:
+        return f"❌ [ERRO_INESPERADO] Ocorreu uma falha: {str(e)}"
+
+
 def gerar_hash_senha(senha: str) -> str:
     salt = os.urandom(16)
     hash_bytes = hashlib.pbkdf2_hmac('sha256', senha.encode('utf-8'), salt, 100000)
     return salt.hex() + ":" + hash_bytes.hex()
+
 
 def verificar_senha(senha_digitada: str, hash_armazenado: str) -> bool:
     try:
@@ -58,10 +73,12 @@ def verificar_senha(senha_digitada: str, hash_armazenado: str) -> bool:
     except Exception:
         return False
 
+
 EXTENSOES_PERMITIDAS_IMAGEM = {".jpg", ".jpeg", ".png", ".webp"}
 EXTENSOES_PERMITIDAS_XML = {".xml"}
 EXTENSOES_PERMITIDAS_MAPA = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".xlsx", ".xls"}
 EXTENSOES_PERMITIDAS_PDF = {".pdf"}
+
 
 def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem") -> str:
     if uploaded_file is None:
@@ -77,13 +94,16 @@ def salvar_arquivo_seguro(uploaded_file, pasta_destino="uploads", tipo="imagem")
         permitidas = EXTENSOES_PERMITIDAS_PDF
     else:
         permitidas = EXTENSOES_PERMITIDAS_IMAGEM
+
     if ext not in permitidas:
-        raise ValueError(f"Extensão não permitida: {ext}")
+        raise AppError(f"Extensão de arquivo não permitida: {ext}", code="EXTENSAO_INVALIDA")
+
     novo_nome = f"{uuid.uuid4().hex}{ext}"
     caminho_completo = os.path.join(pasta_destino, novo_nome)
     with open(caminho_completo, "wb") as f:
         f.write(uploaded_file.getbuffer())
     return caminho_completo
+
 
 def gerar_excel_download(df: pd.DataFrame, nome_arquivo="relatorio.xlsx") -> bytes:
     output = io.BytesIO()
@@ -99,6 +119,7 @@ def gerar_excel_download(df: pd.DataFrame, nome_arquivo="relatorio.xlsx") -> byt
                 df.to_excel(writer, index=False, sheet_name='Relatório')
     return output.getvalue()
 
+
 def gerenciar_limpeza_pdf_pasta(pasta="relatorios_checklist"):
     arquivos = glob.glob(os.path.join(pasta, "*.pdf"))
     arquivos.sort(key=os.path.getctime)
@@ -108,6 +129,7 @@ def gerenciar_limpeza_pdf_pasta(pasta="relatorios_checklist"):
                 os.remove(arquivos[i])
             except Exception:
                 pass
+
 
 def gerar_pdf_checklist(titulo_doc, operador, dados_items, observacoes=""):
     gerenciar_limpeza_pdf_pasta()
@@ -140,7 +162,10 @@ def gerar_pdf_checklist(titulo_doc, operador, dados_items, observacoes=""):
     pdf.output(caminho_pdf)
     return caminho_pdf
 
-# --- CONEXÃO POOLED COM SUPABASE ---
+
+# ==============================================================================
+# 2. CONEXÃO COM BANCO DE DADOS (DB)
+# ==============================================================================
 SUPABASE_DB_URL = st.secrets.get(
     "SUPABASE_DB_URL",
     "postgresql://postgres:SUA_SENHA@db.SEU_PROJETO.supabase.co:6543/postgres"
@@ -163,10 +188,16 @@ def conectar():
         st.cache_resource.clear()
         return obter_conexao()
 
-def inicializar_banco():
+
+# ==============================================================================
+# 3. MIGRATIONS DE BANCO DE DADOS (MIGRATIONS)
+# ==============================================================================
+def executar_migrations():
+    """Executa scripts de criação e atualização incremental do esquema de banco."""
     conn = conectar()
     try:
         with conn.cursor() as cursor:
+            # Tabelas Principais
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS configuracoes (
                 id INTEGER PRIMARY KEY DEFAULT 1,
@@ -177,7 +208,7 @@ def inicializar_banco():
             );
             """)
             cursor.execute("INSERT INTO configuracoes (id, nome_empresa) VALUES (1, 'Sistema de Almoxarifado') ON CONFLICT (id) DO NOTHING;")
-            
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS produtos (
                 id SERIAL PRIMARY KEY,
@@ -193,7 +224,7 @@ def inicializar_banco():
                 qtd_minima REAL DEFAULT 5.0
             );
             """)
-            
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS projetos (
                 id SERIAL PRIMARY KEY,
@@ -204,7 +235,6 @@ def inicializar_banco():
             );
             """)
 
-            # --- NOVAS TABELAS SOLICITADAS ---
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS funcionarios (
                 id SERIAL PRIMARY KEY,
@@ -234,7 +264,8 @@ def inicializar_banco():
                 status TEXT DEFAULT 'Disponível',
                 funcionario_id INTEGER REFERENCES funcionarios (id) ON DELETE SET NULL,
                 projeto_id INTEGER REFERENCES projetos (id) ON DELETE SET NULL,
-                observacao TEXT DEFAULT ''
+                observacao TEXT DEFAULT '',
+                local_atual TEXT DEFAULT 'Almoxarifado'
             );
             """)
 
@@ -264,12 +295,6 @@ def inicializar_banco():
                 usuario TEXT DEFAULT 'Sistema'
             );
             """)
-            
-            try:
-                cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS nome_retirou TEXT DEFAULT '';")
-                cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS projeto_nome TEXT DEFAULT '';")
-            except Exception:
-                pass
 
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
@@ -282,7 +307,7 @@ def inicializar_banco():
                 acao_atual TEXT DEFAULT 'Navegando no Sistema'
             );
             """)
-            
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS notas_fiscais (
                 id SERIAL PRIMARY KEY,
@@ -297,7 +322,7 @@ def inicializar_banco():
                 usuario TEXT DEFAULT 'Sistema'
             );
             """)
-            
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS checklist_ferramentas (
                 id SERIAL PRIMARY KEY,
@@ -307,12 +332,19 @@ def inicializar_banco():
                 observacao TEXT DEFAULT ''
             );
             """)
-            
+
+            # Novas colunas e verificações incrementais de schema
+            cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS nome_retirou TEXT DEFAULT '';")
+            cursor.execute("ALTER TABLE historico ADD COLUMN IF NOT EXISTS projeto_nome TEXT DEFAULT '';")
+            cursor.execute("ALTER TABLE cadastro_ferramentas ADD COLUMN IF NOT EXISTS local_atual TEXT DEFAULT 'Almoxarifado';")
+
             cursor.execute("DELETE FROM historico WHERE data_hora < NOW() - INTERVAL '540 days';")
+
             cursor.execute("SELECT COUNT(*) FROM usuarios")
             if cursor.fetchone()[0] == 0:
                 cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("admin", gerar_hash_senha("1234"), "Admin"))
                 cursor.execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (%s, %s, %s)", ("operador", gerar_hash_senha("1234"), "Operador"))
+
             conn.commit()
     except Exception as e:
         conn.rollback()
@@ -320,10 +352,23 @@ def inicializar_banco():
         raise e
 
 if 'banco_inicializado' not in st.session_state:
-    inicializar_banco()
+    executar_migrations()
     st.session_state.banco_inicializado = True
 
-# --- CONSULTAS E TRANSAÇÕES NO BANCO DE DADOS ---
+
+# ==============================================================================
+# 4. CAMADA DE SERVIÇOS E REGRAS DE NEGÓCIO (SERVICES & MODELS)
+# ==============================================================================
+@st.cache_resource
+def init_gemini():
+    api_key = st.secrets.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    return genai.Client(api_key=api_key)
+
+client_gemini = init_gemini()
+
+
 def atualizar_presenca_usuario(usuario, localizacao="Almoxarifado Principal", acao="Navegando no Sistema"):
     conn = conectar()
     try:
@@ -332,6 +377,7 @@ def atualizar_presenca_usuario(usuario, localizacao="Almoxarifado Principal", ac
             conn.commit()
     except Exception:
         conn.rollback()
+
 
 @st.cache_data(ttl=300)
 def buscar_configuracoes():
@@ -346,6 +392,7 @@ def buscar_configuracoes():
             "mapa_path": res[3] if res else ""
         }
 
+
 def salvar_configuracoes(nome, logo_path, cor, mapa_path=""):
     conn = conectar()
     try:
@@ -356,7 +403,8 @@ def salvar_configuracoes(nome, logo_path, cor, mapa_path=""):
             return True, "Configurações salvas com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao salvar configurações: {e}"
+        return False, tratar_erro(e)
+
 
 def autenticar_usuario(usuario, senha_digitada):
     conn = conectar()
@@ -378,10 +426,12 @@ def autenticar_usuario(usuario, senha_digitada):
         conn.rollback()
         return None
 
+
 @st.cache_data(ttl=15)
 def buscar_produtos():
     conn = conectar()
     return pd.read_sql_query("SELECT id, nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras, ca, qtd_minima FROM produtos ORDER BY id ASC", conn)
+
 
 def cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida="Caixa", qtd_por_caixa=1, foto_path="", codigo_barras="", ca="", qtd_minima=5.0):
     conn = conectar()
@@ -396,7 +446,8 @@ def cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida="
             return True, f"Produto '{nome}' cadastrado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao cadastrar produto: {e}"
+        return False, tratar_erro(e)
+
 
 def editar_produto(prod_id, nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path="", codigo_barras="", ca="", qtd_minima=5.0):
     conn = conectar()
@@ -411,7 +462,8 @@ def editar_produto(prod_id, nome, categoria, localizacao, quantidade, unidade_me
             return True, "Produto atualizado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao atualizar produto: {e}"
+        return False, tratar_erro(e)
+
 
 def mesclar_produtos(id_destino, lista_ids_origem):
     conn = conectar()
@@ -427,7 +479,8 @@ def mesclar_produtos(id_destino, lista_ids_origem):
             return True, "Produtos mesclados com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao mesclar produtos: {e}"
+        return False, tratar_erro(e)
+
 
 def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, responsavel_epi="", nome_retirou="", projeto_nome=""):
     tipo_upper = tipo.upper()
@@ -438,6 +491,7 @@ def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, respon
         nova_qtd = qtd_atual + qtd_mov
     else:
         nova_qtd = qtd_atual - qtd_mov
+
     conn = conectar()
     try:
         with conn.cursor() as cursor:
@@ -451,7 +505,51 @@ def movimentar_produto(prod_id, tipo, qtd_mov, qtd_atual, usuario_logado, respon
             return True, "Movimentação realizada com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao registrar movimentação: {e}"
+        return False, tratar_erro(e)
+
+
+def movimentar_produtos_em_lote(lista_itens: List[Dict[str, Any]], tipo_operacao: str, usuario_logado: str, projeto_nome: str, nome_retirou: str) -> Tuple[bool, str]:
+    """Movimentação de múltiplos itens (saída/devolução) em uma única transação atômica."""
+    if not lista_itens:
+        return False, "Nenhum item informado para movimentação."
+
+    conn = conectar()
+    try:
+        with conn.cursor() as cursor:
+            for item in lista_itens:
+                prod_id = item['prod_id']
+                qtd_mov = item['qtd_mov']
+                resp_epi = item.get('responsavel_epi', '')
+                
+                cursor.execute("SELECT quantidade, nome FROM produtos WHERE id = %s FOR UPDATE", (prod_id,))
+                res = cursor.fetchone()
+                if not res:
+                    raise AppError(f"Produto ID {prod_id} não foi encontrado no banco.")
+
+                qtd_atual, nome_prod = res
+                tipo_upper = tipo_operacao.upper()
+
+                if tipo_upper == "SAÍDA" and qtd_mov > qtd_atual:
+                    raise AppError(f"Estoque insuficiente para '{nome_prod}'! Disponível: {qtd_atual:.2f}, Solicitado: {qtd_mov:.2f}")
+
+                if tipo_upper in ["ENTRADA", "DEVOLUÇÃO", "DEVOLUCAO"]:
+                    nova_qtd = qtd_atual + qtd_mov
+                else:
+                    nova_qtd = qtd_atual - qtd_mov
+
+                cursor.execute("UPDATE produtos SET quantidade = %s WHERE id = %s", (nova_qtd, prod_id))
+                cursor.execute(
+                    "INSERT INTO historico (produto_id, tipo, quantidade, usuario, responsavel_epi, nome_retirou, projeto_nome) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (prod_id, tipo_upper, qtd_mov, usuario_logado, resp_epi, nome_retirou, projeto_nome)
+                )
+
+            conn.commit()
+            st.cache_data.clear()
+            return True, f"{len(lista_itens)} item(ns) movimentado(s) em lote com sucesso!"
+    except Exception as e:
+        conn.rollback()
+        return False, tratar_erro(e)
+
 
 def estornar_movimentacao(historico_id, usuario_logado):
     conn = conectar()
@@ -491,13 +589,14 @@ def estornar_movimentacao(historico_id, usuario_logado):
             return True, "Estorno realizado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao processar estorno: {str(e)}"
+        return False, tratar_erro(e)
 
-# --- NOVAS FUNÇÕES DE FUNCIONÁRIOS E FERRAMENTAS ---
+
 @st.cache_data(ttl=15)
 def buscar_funcionarios():
     conn = conectar()
     return pd.read_sql_query("SELECT id, nome, cpf_matricula, funcao, status FROM funcionarios ORDER BY nome ASC", conn)
+
 
 def cadastrar_funcionario(nome, cpf_matricula="", funcao="Operador"):
     conn = conectar()
@@ -509,57 +608,79 @@ def cadastrar_funcionario(nome, cpf_matricula="", funcao="Operador"):
             return True, f"Funcionário '{nome}' cadastrado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao cadastrar funcionário: {e}"
+        return False, tratar_erro(e)
+
 
 @st.cache_data(ttl=15)
 def buscar_cadastro_ferramentas():
     conn = conectar()
     return pd.read_sql_query("""
     SELECT f.id, f.codigo_patrimonio, f.nome_ferramenta, f.categoria, f.status,
-           func.nome as funcionario_responsavel, proj.nome_projeto as projeto_alocado, f.observacao,
-           f.funcionario_id, f.projeto_id
+           func.nome as funcionario_responsavel, proj.nome_projeto as projeto_alocado,
+           f.local_atual, f.observacao, f.funcionario_id, f.projeto_id
     FROM cadastro_ferramentas f
     LEFT JOIN funcionarios func ON f.funcionario_id = func.id
     LEFT JOIN projetos proj ON f.projeto_id = proj.id
     ORDER BY f.id DESC
     """, conn)
 
-def cadastrar_ferramenta_patrimonio(codigo_patrimonio, nome_ferramenta, categoria="Ferramenta Geral", status="Disponível", funcionario_id=None, projeto_id=None, observacao=""):
+
+def cadastrar_ferramenta_patrimonio(codigo_patrimonio, nome_ferramenta, categoria="Ferramenta Geral", status="Disponível", funcionario_id=None, projeto_id=None, observacao="", local_atual="Almoxarifado"):
     conn = conectar()
     try:
         with conn.cursor() as cursor:
             cursor.execute("""
-            INSERT INTO cadastro_ferramentas (codigo_patrimonio, nome_ferramenta, categoria, status, funcionario_id, projeto_id, observacao)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (codigo_patrimonio.strip(), nome_ferramenta.strip(), categoria, status, funcionario_id, projeto_id, observacao.strip()))
+            INSERT INTO cadastro_ferramentas (codigo_patrimonio, nome_ferramenta, categoria, status, funcionario_id, projeto_id, observacao, local_atual)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (codigo_patrimonio.strip(), nome_ferramenta.strip(), categoria, status, funcionario_id, projeto_id, observacao.strip(), local_atual))
             conn.commit()
             st.cache_data.clear()
             return True, f"Ferramenta '{nome_ferramenta}' ({codigo_patrimonio}) cadastrada!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao cadastrar ferramenta: {e}"
+        return False, tratar_erro(e)
 
-def atualizar_status_ferramenta(ferramenta_id, status, funcionario_id=None, projeto_id=None, observacao=""):
+
+def atualizar_status_ferramenta(ferramenta_id, status, funcionario_id=None, projeto_id=None, observacao="", local_atual="Almoxarifado"):
     conn = conectar()
     try:
         with conn.cursor() as cursor:
             cursor.execute("""
             UPDATE cadastro_ferramentas
-            SET status = %s, funcionario_id = %s, projeto_id = %s, observacao = %s
+            SET status = %s, funcionario_id = %s, projeto_id = %s, observacao = %s, local_atual = %s
             WHERE id = %s
-            """, (status, funcionario_id, projeto_id, observacao, ferramenta_id))
+            """, (status, funcionario_id, projeto_id, observacao, local_atual, ferramenta_id))
             conn.commit()
             st.cache_data.clear()
-            return True, "Status da ferramenta atualizado!"
+            return True, "Status e localização da ferramenta atualizados!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao atualizar ferramenta: {e}"
+        return False, tratar_erro(e)
 
-# --- MÓDULO DE PROJETOS E EQUIPE ---
+
+def atualizar_status_ferramentas_em_lote(lista_ids: List[int], status: str, funcionario_id=None, projeto_id=None, local_atual="Almoxarifado") -> Tuple[bool, str]:
+    """Edição simplificada em massa para alterar de quem está com as ferramentas ou devolução ao almoxarifado."""
+    conn = conectar()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+            UPDATE cadastro_ferramentas
+            SET status = %s, funcionario_id = %s, projeto_id = %s, local_atual = %s
+            WHERE id = ANY(%s)
+            """, (status, funcionario_id, projeto_id, local_atual, lista_ids))
+            conn.commit()
+            st.cache_data.clear()
+            return True, f"{len(lista_ids)} ferramenta(s) atualizada(s) com sucesso!"
+    except Exception as e:
+        conn.rollback()
+        return False, tratar_erro(e)
+
+
 @st.cache_data(ttl=15)
 def buscar_projetos():
     conn = conectar()
     return pd.read_sql_query("SELECT id, nome_projeto, descricao, data_inicio, status FROM projetos ORDER BY id DESC", conn)
+
 
 def cadastrar_projeto(nome_projeto, descricao=""):
     conn = conectar()
@@ -571,7 +692,8 @@ def cadastrar_projeto(nome_projeto, descricao=""):
             return True, f"Projeto '{nome_projeto}' cadastrado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao cadastrar projeto: {e}"
+        return False, tratar_erro(e)
+
 
 @st.cache_data(ttl=15)
 def buscar_equipe_projeto():
@@ -582,6 +704,7 @@ def buscar_equipe_projeto():
     JOIN projetos p ON e.projeto_id = p.id 
     ORDER BY p.nome_projeto ASC
     """, conn)
+
 
 def adicionar_membro_equipe(projeto_id, nome_colaborador, funcao="Operador", funcionario_id=None):
     conn = conectar()
@@ -596,9 +719,9 @@ def adicionar_membro_equipe(projeto_id, nome_colaborador, funcao="Operador", fun
             return True, f"Colaborador '{nome_colaborador}' adicionado ao projeto!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao vincular membro: {e}"
+        return False, tratar_erro(e)
 
-# --- MÓDULO DA BIBLIOTECA DE PROJETOS (PDFs) ---
+
 @st.cache_data(ttl=15)
 def buscar_biblioteca_projetos():
     conn = conectar()
@@ -608,6 +731,7 @@ def buscar_biblioteca_projetos():
     LEFT JOIN projetos p ON b.projeto_id = p.id
     ORDER BY b.id DESC
     """, conn)
+
 
 def cadastrar_desenho_projeto(titulo, descricao, projeto_id, nome_arquivo_orig, pdf_path, usuario):
     conn = conectar()
@@ -622,7 +746,8 @@ def cadastrar_desenho_projeto(titulo, descricao, projeto_id, nome_arquivo_orig, 
             return True, "Desenho/Projeto cadastrado na biblioteca com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao cadastrar item na biblioteca: {e}"
+        return False, tratar_erro(e)
+
 
 def editar_desenho_projeto(id_item, titulo, descricao, projeto_id, novo_pdf_path=None, novo_nome_orig=None):
     conn = conectar()
@@ -652,7 +777,8 @@ def editar_desenho_projeto(id_item, titulo, descricao, projeto_id, novo_pdf_path
             return True, "Anexo de desenho/projeto alterado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao editar item: {e}"
+        return False, tratar_erro(e)
+
 
 def excluir_desenho_projeto(id_item):
     conn = conectar()
@@ -671,7 +797,8 @@ def excluir_desenho_projeto(id_item):
             return True, "Item excluído da biblioteca com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao excluir item: {e}"
+        return False, tratar_erro(e)
+
 
 def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, valor_unit, usuario_logado, categoria="Geral", localizacao="Almoxarifado Principal"):
     valor_total = qtd_mov * valor_unit
@@ -700,7 +827,8 @@ def dar_entrada_nota_fiscal(numero_nf, fornecedor, cnpj, nome_prod, qtd_mov, val
             return True, "Entrada por NF registrada com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao dar entrada na NF: {e}"
+        return False, tratar_erro(e)
+
 
 def processar_xml_nfe(xml_file):
     try:
@@ -738,12 +866,14 @@ def processar_xml_nfe(xml_file):
             
         return True, {"numero_nf": numero_nf, "fornecedor": fornecedor, "cnpj": cnpj, "itens": itens}
     except Exception as e:
-        return False, f"Erro ao ler arquivo XML: {str(e)}"
+        return False, tratar_erro(e)
+
 
 @st.cache_data(ttl=15)
 def buscar_notas_fiscais():
     conn = conectar()
     return pd.read_sql_query("SELECT id, numero_nf, fornecedor, cnpj_fornecedor, produto_nome, quantidade, valor_unitario, valor_total, data_recebimento, usuario FROM notas_fiscais ORDER BY id DESC", conn)
+
 
 @st.cache_data(ttl=5)
 def buscar_usuarios():
@@ -754,6 +884,7 @@ def buscar_usuarios():
     ELSE 'Offline' END as status_online
     FROM usuarios ORDER BY id ASC
     """, conn)
+
 
 def cadastrar_usuario(usuario, senha, perfil):
     try:
@@ -766,7 +897,8 @@ def cadastrar_usuario(usuario, senha, perfil):
             return True, f"Usuário '{usuario}' cadastrado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao cadastrar usuário: {e}"
+        return False, tratar_erro(e)
+
 
 def editar_usuario(user_id, novo_nome, novo_perfil, nova_senha=""):
     try:
@@ -782,7 +914,8 @@ def editar_usuario(user_id, novo_nome, novo_perfil, nova_senha=""):
             return True, "Usuário atualizado com sucesso!"
     except Exception as e:
         conn.rollback()
-        return False, f"Erro ao atualizar usuário: {e}"
+        return False, tratar_erro(e)
+
 
 def salvar_registro_checklist(usuario, pdf_path, observacao=""):
     conn = conectar()
@@ -795,6 +928,7 @@ def salvar_registro_checklist(usuario, pdf_path, observacao=""):
         conn.rollback()
         return False
 
+
 @st.cache_data(ttl=15)
 def buscar_historico():
     conn = conectar()
@@ -803,7 +937,10 @@ def buscar_historico():
     FROM historico h LEFT JOIN produtos p ON h.produto_id = p.id ORDER BY h.id DESC
     """, conn)
 
-# --- INTERFACE E NAVEGAÇÃO ---
+
+# ==============================================================================
+# 5. CAMADA VISUAL E NAVEGAÇÃO (APP / VIEWS)
+# ==============================================================================
 config = buscar_configuracoes()
 st.markdown(f"""
 <style>
@@ -847,7 +984,7 @@ if not st.session_state.logado:
                 st.error("❌ Usuário ou senha incorretos!")
     st.stop()
 
-# --- REORGANIZAÇÃO DAS OPÇÕES DE MENU ---
+# --- OPÇÕES DE MENU ---
 if st.session_state.perfil == "Operador":
     opcoes_menu = [
         "📦 Consulta de Estoque",
@@ -881,6 +1018,7 @@ st.sidebar.title(f"🏢 {config['nome_empresa']}")
 st.sidebar.write(f"👤 **{st.session_state.usuario}** ({st.session_state.perfil})")
 if config['logo_path'] and os.path.exists(config['logo_path']):
     st.sidebar.image(config['logo_path'], use_container_width=True)
+
 if config['mapa_path'] and os.path.exists(config['mapa_path']):
     st.sidebar.write("---")
     st.sidebar.subheader("🗺️ Layout/Mapa")
@@ -1076,7 +1214,7 @@ elif "Pedidos de Compras" in opcao:
                     type="primary"
                 )
 
-# --- ABA DE GESTÃO DE PROJETOS E EQUIPE (ATUALIZADA) ---
+# --- ABA DE GESTÃO DE PROJETOS E EQUIPE ---
 elif "Gestão de Projetos" in opcao:
     st.title("🏗️ Cadastramento e Gestão de Projetos e Equipe")
     st.caption("Cadastre projetos ativos, funcionários e defina a equipe de colaboradores associada a cada obra/serviço.")
@@ -1139,7 +1277,6 @@ elif "Gestão de Projetos" in opcao:
                 m_nome = ""
                 m_funcao = "Operador"
                 f_id_sel = None
-
                 if use_cadastrado and not df_func.empty:
                     f_id_sel = st.selectbox("Selecione o Funcionário:", df_func['id'].tolist(), format_func=lambda x: f"{df_func[df_func['id']==x]['nome'].values[0]} ({df_func[df_func['id']==x]['funcao'].values[0]})")
                     f_row = df_func[df_func['id'] == f_id_sel].iloc[0]
@@ -1171,6 +1308,7 @@ elif "Biblioteca de Desenhos" in opcao:
     df_bib = buscar_biblioteca_projetos()
     df_proj = buscar_projetos()
     tab_consultar, tab_anexar = st.tabs(["🔍 Consultar / Gerenciar Desenhos", "➕ Anexar Novo Desenho / Projeto (PDF)"])
+    
     with tab_consultar:
         if df_bib.empty:
             st.info("Nenhum desenho ou projeto em PDF foi anexado até o momento.")
@@ -1209,7 +1347,7 @@ elif "Biblioteca de Desenhos" in opcao:
                                 key=f"dl_pdf_{row_pdf['id']}"
                             )
                         else:
-                            st.error("⚠️ O arquivo físico em PDF não foi encontrado no servidor.")
+                            st.error("⚠️️ O arquivo físico em PDF não foi encontrado no servidor.")
                     with c_det2:
                         st.markdown("**Ações do Item:**")
                         if st.button("✏️ Alterar", key=f"btn_alt_{row_pdf['id']}"):
@@ -1254,6 +1392,7 @@ elif "Biblioteca de Desenhos" in opcao:
                             elif sub_canc:
                                 st.session_state[f"edit_mode_{row_pdf['id']}"] = False
                                 st.rerun()
+
                     if st.session_state.get(f"del_mode_{row_pdf['id']}", False):
                         st.error(f"⚠️ Tem certeza que deseja excluir o anexo '{row_pdf['titulo']}'?")
                         c_del_sim, c_del_nao = st.columns(2)
@@ -1270,6 +1409,7 @@ elif "Biblioteca de Desenhos" in opcao:
                             if st.button("🟢 Cancelar", key=f"conf_del_nao_{row_pdf['id']}"):
                                 st.session_state[f"del_mode_{row_pdf['id']}"] = False
                                 st.rerun()
+
     with tab_anexar:
         st.subheader("➕ Anexar Novo Arquivo PDF à Biblioteca")
         with st.form("form_novo_pdf_bib", clear_on_submit=True):
@@ -1309,47 +1449,68 @@ elif "Biblioteca de Desenhos" in opcao:
                     except Exception as e:
                         st.error(f"Erro ao processar o arquivo: {e}")
 
-# --- ABA 2: CHECKLIST E RASTREIO DE FERRAMENTAS (ATUALIZADA) ---
+# --- ABA 2: CHECKLIST E RASTREIO DE FERRAMENTAS (REQUISITO 6 IMPLEMENTADO) ---
 elif "Checklist de Ferramentas" in opcao:
     st.title("📋 Checklist e Rastreamento de Ferramentas")
-    st.caption("Cadastre ferramentas patrimoniais, vincule ao funcionário responsável, projeto e faça a conferência diária.")
+    st.caption("Controle a localização das ferramentas (Almoxarifado x Operador x Projeto) individualmente ou em lote.")
     
     df_ferr_cad = buscar_cadastro_ferramentas()
     df_func = buscar_funcionarios()
     df_proj = buscar_projetos()
     
-    tab_chk, tab_cad_ferr = st.tabs(["✅ Checklist Diário & Rastreio", "🛠️ Cadastro de Ferramentas / Equipamentos"])
+    tab_chk, tab_lote, tab_cad_ferr = st.tabs([
+        "✅ Checklist Diário / Edição Rápida", 
+        "⚡ Atualização de Localização em Lote", 
+        "🛠️ Cadastro de Ferramentas"
+    ])
     
     with tab_chk:
         if df_ferr_cad.empty:
             st.warning("Nenhuma ferramenta cadastrada para rastreio. Cadastre na aba 'Cadastro de Ferramentas'.")
         else:
-            st.subheader("🔍 Localizador em Tempo Real: Quem está com o quê?")
-            st.dataframe(df_ferr_cad[['codigo_patrimonio', 'nome_ferramenta', 'status', 'funcionario_responsavel', 'projeto_alocado', 'observacao']], use_container_width=True)
+            st.subheader("🔍 Localizador em Tempo Real: Onde e com quem está a ferramenta?")
+            
+            # Filtro rápido
+            f_filtro = st.selectbox("Filtrar por Localização:", ["Todos", "Almoxarifado", "Em Uso com Operador", "Em Manutenção/Outros"])
+            df_exib = df_ferr_cad.copy()
+            if f_filtro == "Almoxarifado":
+                df_exib = df_exib[df_exib['local_atual'] == 'Almoxarifado']
+            elif f_filtro == "Em Uso com Operador":
+                df_exib = df_exib[df_exib['local_atual'] == 'Com Operador']
+            elif f_filtro == "Em Manutenção/Outros":
+                df_exib = df_exib[df_exib['local_atual'].isin(['Em Manutenção', 'Outros'])]
+
+            st.dataframe(df_exib[['codigo_patrimonio', 'nome_ferramenta', 'status', 'local_atual', 'funcionario_responsavel', 'projeto_alocado', 'observacao']], use_container_width=True)
             
             st.write("---")
-            st.subheader("📝 Gerenciar Empréstimo / Alocação / Checklist")
+            st.subheader("📝 Edição Facilitada de Rastreio (Almoxarifado x Operador)")
             
             with st.form("form_checklist_ferramentas_patrimonio", clear_on_submit=True):
                 ferr_id_sel = st.selectbox("Selecione a Ferramenta:", df_ferr_cad['id'].tolist(), format_func=lambda x: f"[{df_ferr_cad[df_ferr_cad['id']==x]['codigo_patrimonio'].values[0]}] - {df_ferr_cad[df_ferr_cad['id']==x]['nome_ferramenta'].values[0]}")
                 ferr_row = df_ferr_cad[df_ferr_cad['id'] == ferr_id_sel].iloc[0]
                 
-                c1, c2, c3 = st.columns(3)
+                c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    novo_status = st.selectbox("Status Atual:", ["Disponível", "Em Uso / Emprestado", "Em Manutenção", "Defeituoso", "Ausente/Perdido"], index=["Disponível", "Em Uso / Emprestado", "Em Manutenção", "Defeituoso", "Ausente/Perdido"].index(ferr_row['status']) if ferr_row['status'] in ["Disponível", "Em Uso / Emprestado", "Em Manutenção", "Defeituoso", "Ausente/Perdido"] else 0)
+                    novo_local = st.selectbox("Localização Atual:", ["Almoxarifado", "Com Operador", "Em Manutenção", "Outros"], index=["Almoxarifado", "Com Operador", "Em Manutenção", "Outros"].index(ferr_row.get('local_atual', 'Almoxarifado')) if ferr_row.get('local_atual') in ["Almoxarifado", "Com Operador", "Em Manutenção", "Outros"] else 0)
                 with c2:
+                    novo_status = st.selectbox("Status:", ["Disponível", "Em Uso / Emprestado", "Em Manutenção", "Defeituoso", "Ausente/Perdido"], index=["Disponível", "Em Uso / Emprestado", "Em Manutenção", "Defeituoso", "Ausente/Perdido"].index(ferr_row['status']) if ferr_row['status'] in ["Disponível", "Em Uso / Emprestado", "Em Manutenção", "Defeituoso", "Ausente/Perdido"] else 0)
+                with c3:
                     func_opts = [None] + (df_func['id'].tolist() if not df_func.empty else [])
                     idx_func = func_opts.index(ferr_row['funcionario_id']) if ferr_row['funcionario_id'] in func_opts else 0
-                    sel_func_id = st.selectbox("Funcionário Responsável:", func_opts, index=idx_func, format_func=lambda x: "Nenhum / Devolvido" if x is None else df_func[df_func['id']==x]['nome'].values[0])
-                with c3:
+                    sel_func_id = st.selectbox("Funcionário Responsável:", func_opts, index=idx_func, format_func=lambda x: "Nenhum / Devolvido ao Almoxarifado" if x is None else df_func[df_func['id']==x]['nome'].values[0])
+                with c4:
                     proj_opts = [None] + (df_proj['id'].tolist() if not df_proj.empty else [])
                     idx_proj = proj_opts.index(ferr_row['projeto_id']) if ferr_row['projeto_id'] in proj_opts else 0
                     sel_proj_id = st.selectbox("Projeto Alocado:", proj_opts, index=idx_proj, format_func=lambda x: "Sem Projeto" if x is None else df_proj[df_proj['id']==x]['nome_projeto'].values[0])
                 
-                obs_f = st.text_input("Observações do Estado / Motivo da Troca:", value=str(ferr_row['observacao'] or ''))
+                obs_f = st.text_input("Observações de Conservação / Motivo de Troca:", value=str(ferr_row['observacao'] or ''))
                 
-                if st.form_submit_button("💾 Atualizar Rastreio e Salvar Estado", type="primary"):
-                    ok, msg = atualizar_status_ferramenta(ferr_id_sel, novo_status, sel_func_id, sel_proj_id, obs_f)
+                if st.form_submit_button("💾 Salvar / Atualizar Rastreio", type="primary"):
+                    if novo_local == "Almoxarifado":
+                        sel_func_id = None
+                        novo_status = "Disponível"
+
+                    ok, msg = atualizar_status_ferramenta(ferr_id_sel, novo_status, sel_func_id, sel_proj_id, obs_f, local_atual=novo_local)
                     if ok:
                         st.success(msg)
                         st.rerun()
@@ -1362,8 +1523,8 @@ elif "Checklist de Ferramentas" in opcao:
                 for _, r_f in df_ferr_cad.iterrows():
                     itens_checklist.append({
                         "ferramenta": f"{r_f['codigo_patrimonio']} - {r_f['nome_ferramenta']}",
-                        "status": r_f['status'],
-                        "obs": f"Resp: {r_f['funcionario_responsavel'] or 'Nenhum'} | Proj: {r_f['projeto_alocado'] or 'N/A'}"
+                        "status": f"{r_f['status']} ({r_f.get('local_atual', 'Almoxarifado')})",
+                        "obs": f"Resp: {r_f['funcionario_responsavel'] or 'Almoxarifado'} | Proj: {r_f['projeto_alocado'] or 'N/A'}"
                     })
                 try:
                     path_pdf = gerar_pdf_checklist("Checklist de Ferramentas", st.session_state.usuario, itens_checklist)
@@ -1379,6 +1540,53 @@ elif "Checklist de Ferramentas" in opcao:
                 except Exception as e:
                     st.error(f"Erro ao gerar PDF: {e}")
 
+    with tab_lote:
+        st.subheader("⚡ Atualização Facilitada em Lote (Devolução ou Saída de Múltiplas Ferramentas)")
+        st.caption("Altere a localização de várias ferramentas de uma vez só para o Almoxarifado ou para um Operador.")
+        
+        if df_ferr_cad.empty:
+            st.info("Nenhuma ferramenta cadastrada.")
+        else:
+            ferramentas_selecionadas = st.multiselect(
+                "Selecione as Ferramentas para Alteração:",
+                options=df_ferr_cad['id'].tolist(),
+                format_func=lambda x: f"[{df_ferr_cad[df_ferr_cad['id']==x]['codigo_patrimonio'].values[0]}] {df_ferr_cad[df_ferr_cad['id']==x]['nome_ferramenta'].values[0]} ({df_ferr_cad[df_ferr_cad['id']==x]['local_atual'].values[0]})"
+            )
+
+            col_l1, col_l2, col_l3 = st.columns(3)
+            with col_l1:
+                acao_lote = st.radio("Destino em Lote:", ["Voltar para o Almoxarifado", "Entregar para Operador/Projeto"])
+            with col_l2:
+                func_lote_id = None
+                if acao_lote == "Entregar para Operador/Projeto":
+                    func_lote_id = st.selectbox("Selecione o Operador Responsável:", [None] + (df_func['id'].tolist() if not df_func.empty else []), format_func=lambda x: "Nenhum" if x is None else df_func[df_func['id']==x]['nome'].values[0])
+            with col_l3:
+                proj_lote_id = None
+                if acao_lote == "Entregar para Operador/Projeto":
+                    proj_lote_id = st.selectbox("Selecione o Projeto:", [None] + (df_proj['id'].tolist() if not df_proj.empty else []), format_func=lambda x: "Nenhum" if x is None else df_proj[df_proj['id']==x]['nome_projeto'].values[0])
+
+            if st.button("⚡ Executar Atualização em Lote", type="primary"):
+                if not ferramentas_selecionadas:
+                    st.warning("Selecione ao menos uma ferramenta.")
+                else:
+                    if acao_lote == "Voltar para o Almoxarifado":
+                        st_lote = "Disponível"
+                        loc_lote = "Almoxarifado"
+                        f_id = None
+                        p_id = None
+                    else:
+                        st_lote = "Em Uso / Emprestado"
+                        loc_lote = "Com Operador"
+                        f_id = func_lote_id
+                        p_id = proj_lote_id
+
+                    ok, msg = atualizar_status_ferramentas_em_lote(ferramentas_selecionadas, st_lote, f_id, p_id, local_atual=loc_lote)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
     with tab_cad_ferr:
         st.subheader("➕ Cadastrar Nova Ferramenta Patrimonial")
         with st.form("form_cad_ferramenta_pat", clear_on_submit=True):
@@ -1388,7 +1596,7 @@ elif "Checklist de Ferramentas" in opcao:
             
             c1, c2 = st.columns(2)
             with c1:
-                f_func_id = st.selectbox("Funcionário Inicial (Opcional):", [None] + (df_func['id'].tolist() if not df_func.empty else []), format_func=lambda x: "Nenhum" if x is None else df_func[df_func['id']==x]['nome'].values[0])
+                f_func_id = st.selectbox("Funcionário Inicial (Opcional):", [None] + (df_func['id'].tolist() if not df_func.empty else []), format_func=lambda x: "Nenhum (No Almoxarifado)" if x is None else df_func[df_func['id']==x]['nome'].values[0])
             with c2:
                 f_proj_id = st.selectbox("Projeto Inicial (Opcional):", [None] + (df_proj['id'].tolist() if not df_proj.empty else []), format_func=lambda x: "Nenhum" if x is None else df_proj[df_proj['id']==x]['nome_projeto'].values[0])
                 
@@ -1396,7 +1604,9 @@ elif "Checklist de Ferramentas" in opcao:
             
             if st.form_submit_button("💾 Salvar Cadastro da Ferramenta", type="primary"):
                 if f_patrimonio.strip() and f_nome.strip():
-                    ok, msg = cadastrar_ferramenta_patrimonio(f_patrimonio, f_nome, f_cat, "Disponível", f_func_id, f_proj_id, f_obs)
+                    loc_inicial = "Com Operador" if f_func_id else "Almoxarifado"
+                    st_inicial = "Em Uso / Emprestado" if f_func_id else "Disponível"
+                    ok, msg = cadastrar_ferramenta_patrimonio(f_patrimonio, f_nome, f_cat, st_inicial, f_func_id, f_proj_id, f_obs, local_atual=loc_inicial)
                     if ok:
                         st.success(msg)
                         st.rerun()
@@ -1405,136 +1615,250 @@ elif "Checklist de Ferramentas" in opcao:
                 else:
                     st.warning("Código de Patrimônio e Nome são obrigatórios.")
 
-# --- ABA 3: RETIRADA E DEVOLUÇÃO DE MATERIAIS (COM RESET DE CAMPOS AUTOMÁTICO) ---
+# --- ABA 3: RETIRADA E DEVOLUÇÃO DE MATERIAIS (REQUISITO 7 IMPLEMENTADO) ---
 elif "Retirada / Devolução" in opcao:
-    st.title("🔄 Retirada / Devolução de Materiais")
+    st.title("🔄 Retirada / Devolução de Materiais em Lote")
+    st.caption("Adicione múltiplos itens ao carrinho de movimentação para registrar saídas ou devoluções de uma só vez.")
+
     df_prod = buscar_produtos()
     df_proj = buscar_projetos()
     df_eq = buscar_equipe_projeto()
     df_func = buscar_funcionarios()
-    
-    if "retirada_form_version" not in st.session_state:
-        st.session_state.retirada_form_version = 0
 
-    versao_form = st.session_state.retirada_form_version
+    if "carrinho_movimentacao" not in st.session_state:
+        st.session_state.carrinho_movimentacao = []
 
     if df_prod.empty:
         st.info("Nenhum produto cadastrado.")
     else:
-        st.subheader("1. Tipo de Operação")
-        tipo_operacao = st.radio("Selecione a Ação:", ["📤 Retirada (Saída)", "📥 Devolução (Entrada/Reinserção)"], horizontal=True, key=f"tipo_op_{versao_form}")
-        tipo_mov_banco = "SAÍDA" if "Retirada" in tipo_operacao else "DEVOLUÇÃO"
-        
-        st.write("---")
-        st.subheader("2. Selecionar Produto")
-        cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:", key=f"retirada_cod_bipado_{versao_form}")
-        
-        prod_selecionado = None
-        if cod_bipado.strip():
-            match = df_prod[df_prod['codigo_barras'].astype(str) == cod_bipado.strip()]
-            if not match.empty:
-                prod_selecionado = match.iloc[0]['nome']
-                st.success(f"Item Encontrado: **{prod_selecionado}**")
-            else:
-                st.warning("Código de barras não encontrado no cadastro.")
+        tab_mov_lote, tab_mov_unica = st.tabs(["📦 Movimentação Múltipla (Carrinho de Itens)", "⚡ Movimentação Rápida de Único Item"])
+
+        with tab_mov_lote:
+            st.subheader("1. Configurações Gerais da Operação")
+            col_g1, col_g2, col_g3 = st.columns(3)
+            with col_g1:
+                tipo_op_lote = st.radio("Tipo de Operação:", ["📤 Retirada (Saída em Lote)", "📥 Devolução (Entrada em Lote)"])
+                tipo_mov_str = "SAÍDA" if "Retirada" in tipo_op_lote else "DEVOLUÇÃO"
+            with col_g2:
+                lista_projetos = ["Geral / Sem Projeto Específico"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
+                proj_lote_sel = st.selectbox("🏗️ Projeto Destino:", lista_projetos)
+            with col_g3:
+                colaboradores_sugeridos = []
+                if proj_lote_sel != "Geral / Sem Projeto Específico" and not df_eq.empty:
+                    colaboradores_sugeridos = df_eq[df_eq['nome_projeto'] == proj_lote_sel]['nome_colaborador'].tolist()
                 
-        if not prod_selecionado:
-            prod_selecionado = st.selectbox("Ou Escolha o Item na Lista:", df_prod['nome'].tolist(), key=f"retirada_select_item_{versao_form}")
-            
-        row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
-        
-        st.write("---")
-        st.subheader(f"3. Dados para {tipo_operacao}")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.info(f"📦 **Item:** {row['nome']} \n\n🏷️ **Categoria:** {row['categoria']} \n\n📊 **Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
-            
-            medida_item = row['unidade_medida']
-            fator_emb = row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 1
-            
-            if medida_item == "Caixa":
-                modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key=f"modo_medida_{versao_form}")
-                if modo_medida == "Por Caixa":
-                    qtd_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0, key=f"qtd_cx_{versao_form}")
-                    qtd_mov_final = qtd_input * fator_emb
-                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+                if not df_func.empty:
+                    func_sel_op = st.selectbox("Puxar Funcionário Cadastrado:", ["Digitar manualmente"] + df_func['nome'].tolist())
+                    default_nome = "" if func_sel_op == "Digitar manualmente" else func_sel_op
                 else:
-                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key=f"qtd_un_{versao_form}")
-            elif medida_item == "Pacote":
-                modo_medida = st.radio("Modo da Operação:", ["Por Unidade Avulsa", "Por Pacote Fechado"], horizontal=True, key=f"modo_medida_{versao_form}")
-                if modo_medida == "Por Pacote Fechado":
-                    qtd_input = st.number_input(f"Qtd em Pacotes (Cada pacote contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0, key=f"qtd_pac_{versao_form}")
-                    qtd_mov_final = qtd_input * fator_emb
-                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
-                else:
-                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key=f"qtd_un_{versao_form}")
-            elif medida_item in ["Metro", "Rolo"]:
-                modo_medida = st.radio("Modo da Operação:", ["Por Metros", "Por Rolos Fechados"], horizontal=True, key=f"modo_medida_{versao_form}")
-                if modo_medida == "Por Rolos Fechados":
-                    qtd_input = st.number_input(f"Qtd de Rolos (Cada rolo tem {fator_emb}m):", min_value=0.1, step=1.0, value=1.0, key=f"qtd_rolo_{versao_form}")
-                    qtd_mov_final = qtd_input * fator_emb
-                    st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Metros**")
-                else:
-                    qtd_mov_final = st.number_input("Qtd em Metros:", min_value=0.1, step=0.5, value=1.0, key=f"qtd_m_{versao_form}")
-            else:
-                qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key=f"retirada_qtd_un_{versao_form}")
-            
-            eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
-            responsavel_epi = ""
-            
-        with col2:
-            st.write("📋 **Destinação e Responsável:**")
-            
-            lista_projetos = ["Geral / Sem Projeto Específico"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
-            projeto_selecionado = st.selectbox("🏗️ Projeto Destino:", lista_projetos, key=f"proj_dest_{versao_form}")
-            
-            colaboradores_sugeridos = []
-            if projeto_selecionado != "Geral / Sem Projeto Específico" and not df_eq.empty:
-                colaboradores_sugeridos = df_eq[df_eq['nome_projeto'] == projeto_selecionado]['nome_colaborador'].tolist()
-            
-            if not df_func.empty:
-                st.caption("💡 Selecione abaixo um funcionário cadastrado ou digite um novo nome.")
-                func_sel_op = st.selectbox("Puxar Funcionário Cadastrado:", ["Digitar manualmente"] + df_func['nome'].tolist(), key=f"func_sel_ret_{versao_form}")
-                default_nome = "" if func_sel_op == "Digitar manualmente" else func_sel_op
-            else:
-                default_nome = ""
+                    default_nome = ""
+                
+                nome_retirou_lote = st.text_input("👤 Nome do Responsável *:", value=default_nome, placeholder="Quem está retirando/devolvendo")
+                if colaboradores_sugeridos:
+                    st.caption(f"💡 Sugestões da equipe: {', '.join(colaboradores_sugeridos)}")
 
-            nome_retirou = st.text_input("👤 Nome de Quem Retirou *:", value=default_nome, key=f"nome_retirou_{versao_form}", placeholder="Informe o nome da pessoa que está pegando o material")
-            if colaboradores_sugeridos:
-                st.caption(f"💡 Sugestões da equipe do projeto: {', '.join(colaboradores_sugeridos)}")
-            if eh_epi:
-                st.warning("⚠️ **ESTE ITEM É UM EPI!**")
-                if row.get('ca'):
-                    st.info(f"🛡️ **Número do CA do EPI:** {row['ca']}")
-                responsavel_epi = st.text_input("👤 Matrícula/Nome p/ Registro de EPI:", value=nome_retirou, key=f"retirada_resp_epi_{versao_form}")
+            st.write("---")
+            st.subheader("2. Adicionar Itens ao Carrinho")
 
-        st.write("---")
-        btn_label = "📤 Confirmar Retirada de Item" if tipo_mov_banco == "SAÍDA" else "📥 Confirmar Devolução e Recompor Estoque"
-        
-        if st.button(btn_label, type="primary"):
-            if tipo_mov_banco == "SAÍDA" and not nome_retirou.strip():
-                st.error("❌ Por favor, informe o **Nome de quem retirou** o material!")
-            elif eh_epi and not responsavel_epi.strip():
-                st.error("❌ Erro: Preencha a verificação de EPI!")
-            else:
-                ok, msg = movimentar_produto(
-                    int(row['id']),
-                    tipo_mov_banco,
-                    float(qtd_mov_final),
-                    float(row['quantidade']),
-                    st.session_state.usuario,
-                    responsavel_epi,
-                    nome_retirou,
-                    projeto_selecionado
-                )
-                if ok:
-                    st.success(f"✅ Operação realizada com sucesso! {msg}")
-                    # Incrementa a versão do formulário para resetar/zerar todos os campos da tela automaticamente
-                    st.session_state.retirada_form_version += 1
-                    st.rerun()
+            col_i1, col_i2, col_i3 = st.columns([2, 1, 1])
+            with col_i1:
+                cod_bipado_lote = st.text_input("🔍 Bipar Código de Barras:")
+                prod_selecionado_lote = None
+                if cod_bipado_lote.strip():
+                    match = df_prod[df_prod['codigo_barras'].astype(str) == cod_bipado_lote.strip()]
+                    if not match.empty:
+                        prod_selecionado_lote = match.iloc[0]['id']
+                
+                if not prod_selecionado_lote:
+                    prod_selecionado_lote = st.selectbox(
+                        "Ou Selecione o Produto:", 
+                        df_prod['id'].tolist(), 
+                        format_func=lambda x: f"{df_prod[df_prod['id']==x]['nome'].values[0]} (Estoque: {df_prod[df_prod['id']==x]['quantidade'].values[0]} {df_prod[df_prod['id']==x]['unidade_medida'].values[0]})"
+                    )
+
+            prod_row_lote = df_prod[df_prod['id'] == prod_selecionado_lote].iloc[0]
+            fator_emb = prod_row_lote['qtd_por_caixa'] if prod_row_lote['qtd_por_caixa'] > 0 else 1
+
+            with col_i2:
+                unidade_medida = prod_row_lote['unidade_medida']
+                qtd_input_lote = st.number_input(f"Quantidade ({unidade_medida}):", min_value=0.1, value=1.0, step=1.0)
+                
+                if unidade_medida in ["Caixa", "Pacote", "Rolo"] and fator_emb > 1:
+                    modo_m = st.checkbox(f"Multiplicar por Embalagem ({fator_emb} un/m)", value=False)
+                    qtd_calculada = qtd_input_lote * fator_emb if modo_m else qtd_input_lote
                 else:
-                    st.error(msg)
+                    qtd_calculada = qtd_input_lote
+
+            with col_i3:
+                resp_epi_item = ""
+                eh_epi = "EPI" in str(prod_row_lote['categoria']).upper() or "EPI" in str(prod_row_lote['nome']).upper()
+                if eh_epi:
+                    st.warning("🛡️ Produto é EPI")
+                    resp_epi_item = st.text_input("CA / Matrícula EPI:", value=nome_retirou_lote)
+
+                st.write(" ")
+                st.write(" ")
+                if st.button("➕ Adicionar ao Carrinho"):
+                    st.session_state.carrinho_movimentacao.append({
+                        "prod_id": int(prod_row_lote['id']),
+                        "nome": prod_row_lote['nome'],
+                        "qtd_mov": float(qtd_calculada),
+                        "unidade": unidade_medida,
+                        "responsavel_epi": resp_epi_item
+                    })
+                    st.success(f"Item '{prod_row_lote['nome']}' adicionado ao carrinho!")
+
+            st.write("---")
+            st.subheader(f"🛒 Carrinho de Movimentação ({len(st.session_state.carrinho_movimentacao)} Itens)")
+
+            if st.session_state.carrinho_movimentacao:
+                df_carrinho = pd.DataFrame(st.session_state.carrinho_movimentacao)
+                st.dataframe(df_carrinho[['nome', 'qtd_mov', 'unidade', 'responsavel_epi']], use_container_width=True)
+
+                col_c1, col_c2 = st.columns(2)
+                with col_c1:
+                    if st.button("🔴 Limpar Carrinho"):
+                        st.session_state.carrinho_movimentacao = []
+                        st.rerun()
+
+                with col_c2:
+                    if st.button(f"🚀 Finalizar Operação de {tipo_mov_str} em Lote", type="primary"):
+                        if tipo_mov_str == "SAÍDA" and not nome_retirou_lote.strip():
+                            st.error("❌ Preencha o nome do responsável pela retirada.")
+                        else:
+                            ok, msg = movimentar_produtos_em_lote(
+                                st.session_state.carrinho_movimentacao,
+                                tipo_mov_str,
+                                st.session_state.usuario,
+                                proj_lote_sel,
+                                nome_retirou_lote
+                            )
+                            if ok:
+                                st.success(msg)
+                                st.session_state.carrinho_movimentacao = []
+                                st.rerun()
+                            else:
+                                st.error(msg)
+            else:
+                st.info("Nenhum item no carrinho. Adicione produtos acima.")
+
+        with tab_mov_unica:
+            # Mantém o fluxo legado de item único
+            if "retirada_form_version" not in st.session_state:
+                st.session_state.retirada_form_version = 0
+            versao_form = st.session_state.retirada_form_version
+
+            st.subheader("1. Tipo de Operação")
+            tipo_operacao = st.radio("Selecione a Ação:", ["📤 Retirada (Saída)", "📥 Devolução (Entrada/Reinserção)"], horizontal=True, key=f"tipo_op_{versao_form}")
+            tipo_mov_banco = "SAÍDA" if "Retirada" in tipo_operacao else "DEVOLUÇÃO"
+            
+            st.write("---")
+            st.subheader("2. Selecionar Produto")
+            cod_bipado = st.text_input("🔍 Bipar Código de Barras para Selecionar Rápidamente:", key=f"retirada_cod_bipado_{versao_form}")
+            
+            prod_selecionado = None
+            if cod_bipado.strip():
+                match = df_prod[df_prod['codigo_barras'].astype(str) == cod_bipado.strip()]
+                if not match.empty:
+                    prod_selecionado = match.iloc[0]['nome']
+                    st.success(f"Item Encontrado: **{prod_selecionado}**")
+                else:
+                    st.warning("Código de barras não encontrado no cadastro.")
+                    
+            if not prod_selecionado:
+                prod_selecionado = st.selectbox("Ou Escolha o Item na Lista:", df_prod['nome'].tolist(), key=f"retirada_select_item_{versao_form}")
+                
+            row = df_prod[df_prod['nome'] == prod_selecionado].iloc[0]
+            
+            st.write("---")
+            st.subheader(f"3. Dados para {tipo_operacao}")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.info(f"📦 **Item:** {row['nome']} \n\n🏷️ **Categoria:** {row['categoria']} \n\n📊 **Estoque Atual:** {row['quantidade']} ({row['unidade_medida']})")
+                
+                medida_item = row['unidade_medida']
+                fator_emb = row['qtd_por_caixa'] if row['qtd_por_caixa'] > 0 else 1
+                
+                if medida_item == "Caixa":
+                    modo_medida = st.radio("Modo da Operação:", ["Por Unidade", "Por Caixa"], horizontal=True, key=f"modo_medida_{versao_form}")
+                    if modo_medida == "Por Caixa":
+                        qtd_input = st.number_input(f"Qtd em Caixas (Cada caixa contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0, key=f"qtd_cx_{versao_form}")
+                        qtd_mov_final = qtd_input * fator_emb
+                        st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+                    else:
+                        qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key=f"qtd_un_{versao_form}")
+                elif medida_item == "Pacote":
+                    modo_medida = st.radio("Modo da Operação:", ["Por Unidade Avulsa", "Por Pacote Fechado"], horizontal=True, key=f"modo_medida_{versao_form}")
+                    if modo_medida == "Por Pacote Fechado":
+                        qtd_input = st.number_input(f"Qtd em Pacotes (Cada pacote contém {fator_emb} un):", min_value=0.1, step=1.0, value=1.0, key=f"qtd_pac_{versao_form}")
+                        qtd_mov_final = qtd_input * fator_emb
+                        st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Unidades**")
+                    else:
+                        qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key=f"qtd_un_{versao_form}")
+                elif medida_item in ["Metro", "Rolo"]:
+                    modo_medida = st.radio("Modo da Operação:", ["Por Metros", "Por Rolos Fechados"], horizontal=True, key=f"modo_medida_{versao_form}")
+                    if modo_medida == "Por Rolos Fechados":
+                        qtd_input = st.number_input(f"Qtd de Rolos (Cada rolo tem {fator_emb}m):", min_value=0.1, step=1.0, value=1.0, key=f"qtd_rolo_{versao_form}")
+                        qtd_mov_final = qtd_input * fator_emb
+                        st.caption(f"Total a movimentar no estoque: **{qtd_mov_final:.2f} Metros**")
+                    else:
+                        qtd_mov_final = st.number_input("Qtd em Metros:", min_value=0.1, step=0.5, value=1.0, key=f"qtd_m_{versao_form}")
+                else:
+                    qtd_mov_final = st.number_input("Qtd em Unidades:", min_value=0.1, step=1.0, value=1.0, key=f"retirada_qtd_un_{versao_form}")
+                
+                eh_epi = "EPI" in str(row['categoria']).upper() or "EPI" in str(row['nome']).upper()
+                responsavel_epi = ""
+                
+            with col2:
+                st.write("📋 **Destinação e Responsável:**")
+                
+                lista_projetos = ["Geral / Sem Projeto Específico"] + (df_proj['nome_projeto'].tolist() if not df_proj.empty else [])
+                projeto_selecionado = st.selectbox("🏗️ Projeto Destino:", lista_projetos, key=f"proj_dest_{versao_form}")
+                
+                colaboradores_sugeridos = []
+                if projeto_selecionado != "Geral / Sem Projeto Específico" and not df_eq.empty:
+                    colaboradores_sugeridos = df_eq[df_eq['nome_projeto'] == projeto_selecionado]['nome_colaborador'].tolist()
+                
+                if not df_func.empty:
+                    st.caption("💡 Selecione abaixo um funcionário cadastrado ou digite um novo nome.")
+                    func_sel_op = st.selectbox("Puxar Funcionário Cadastrado:", ["Digitar manualmente"] + df_func['nome'].tolist(), key=f"func_sel_ret_{versao_form}")
+                    default_nome = "" if func_sel_op == "Digitar manualmente" else func_sel_op
+                else:
+                    default_nome = ""
+                nome_retirou = st.text_input("👤 Nome de Quem Retirou *:", value=default_nome, key=f"nome_retirou_{versao_form}", placeholder="Informe o nome da pessoa que está pegando o material")
+                if colaboradores_sugeridos:
+                    st.caption(f"💡 Sugestões da equipe do projeto: {', '.join(colaboradores_sugeridos)}")
+                if eh_epi:
+                    st.warning("⚠️ **ESTE ITEM É UM EPI!**")
+                    if row.get('ca'):
+                        st.info(f"🛡️ **Número do CA do EPI:** {row['ca']}")
+                    responsavel_epi = st.text_input("👤 Matrícula/Nome p/ Registro de EPI:", value=nome_retirou, key=f"retirada_resp_epi_{versao_form}")
+            st.write("---")
+            btn_label = "📤 Confirmar Retirada de Item" if tipo_mov_banco == "SAÍDA" else "📥 Confirmar Devolução e Recompor Estoque"
+            
+            if st.button(btn_label, type="primary"):
+                if tipo_mov_banco == "SAÍDA" and not nome_retirou.strip():
+                    st.error("❌ Por favor, informe o **Nome de quem retirou** o material!")
+                elif eh_epi and not responsavel_epi.strip():
+                    st.error("❌ Erro: Preencha a verificação de EPI!")
+                else:
+                    ok, msg = movimentar_produto(
+                        int(row['id']),
+                        tipo_mov_banco,
+                        float(qtd_mov_final),
+                        float(row['quantidade']),
+                        st.session_state.usuario,
+                        responsavel_epi,
+                        nome_retirou,
+                        projeto_selecionado
+                    )
+                    if ok:
+                        st.success(f"✅ Operação realizada com sucesso! {msg}")
+                        st.session_state.retirada_form_version += 1
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 # --- ABA 4: CADASTRO DE PRODUTO ---
 elif "Cadastrar Produto" in opcao:
@@ -1560,453 +1884,179 @@ elif "Cadastrar Produto" in opcao:
             elif unidade_medida == "Pacote":
                 qtd_por_caixa = st.number_input("📦 Qtd de Itens (Volumes Únicos) dentro de 1 Pacote", min_value=1, value=1)
             elif unidade_medida in ["Metro", "Rolo"]:
-                qtd_por_caixa = st.number_input("📏 Metragem Padrão de cada Rolo (em Metros)", min_value=1, value=100)
+                qtd_por_caixa = st.number_input("📏 Metragem Padrão de cada Rolo (em Metros)", min_value=1, value=10)
+            else:
+                qtd_por_caixa = st.number_input("📦 Qtd por Embalagem", min_value=1, value=1)
+                
             quantidade = st.number_input("📊 Quantidade Inicial em Estoque", min_value=0.0, step=1.0, value=0.0)
-            foto = st.file_uploader("🖼️ Foto do Produto (Opcional)", type=["jpg", "png", "jpeg"])
             
-        sub = st.form_submit_button("➕ Cadastrar Produto")
-        if sub:
+        if st.form_submit_button("💾 Cadastrar Produto", type="primary"):
             if nome.strip():
-                foto_path = ""
-                if foto is not None:
-                    foto_path = salvar_arquivo_seguro(foto, tipo="imagem")
-                ok, msg = cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, foto_path, codigo_barras, ca, qtd_minima)
+                ok, msg = cadastrar_produto(nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, "", codigo_barras, ca, qtd_minima)
                 if ok:
                     st.success(msg)
                     st.rerun()
                 else:
                     st.error(msg)
             else:
-                st.warning("⚠️ O nome do produto é obrigatório!")
+                st.warning("O nome do produto é obrigatório.")
 
-# --- ABA 5: ENTRADA POR NOTA FISCAL ---
+# --- ABA 5: ENTRADA DE NOTA FISCAL (XML) ---
 elif "Entrada de NF" in opcao:
-    st.title("📑 Recebimento e Entrada por Nota Fiscal")
-    aba_xml, aba_manual = st.tabs(["📂 Importar Arquivo XML (Automático)", "✍️ Lançamento Manual"])
+    st.title("📑 Entrada Automática de Nota Fiscal via XML")
+    uploaded_xml = st.file_uploader("Selecione o arquivo XML da NFe:", type=["xml"])
     
-    with aba_xml:
-        uploaded_xml = st.file_uploader("Arraste ou selecione o arquivo .xml da Nota Fiscal:", type=["xml"])
-        if uploaded_xml is not None:
-            sucesso, dados_nfe = processar_xml_nfe(uploaded_xml)
-            if sucesso:
-                st.success(f"✅ XML lido com sucesso! Nota Fiscal **{dados_nfe['numero_nf']}**")
-                st.write(f"🏢 **Fornecedor:** {dados_nfe['fornecedor']} | **CNPJ:** {dados_nfe['cnpj']}")
-                
-                st.subheader("Selecione os itens que deseja cadastrar/atualizar no estoque:")
-                df_itens = pd.DataFrame(dados_nfe['itens'])
-                df_itens.insert(0, "Selecionar", True)
-                
-                df_itens_editado = st.data_editor(
-                    df_itens,
-                    column_config={"Selecionar": st.column_config.CheckboxColumn("Cadastrar?", default=True)},
-                    disabled=["produto", "quantidade", "valor_unitario", "valor_total"],
-                    hide_index=True,
-                    use_container_width=True
-                )
-                
-                if st.button("🚀 Confirmar e Dar Entrada Automática nos Itens Selecionados", type="primary"):
-                    itens_selecionados = df_itens_editado[df_itens_editado["Selecionar"] == True]
-                    if itens_selecionados.empty:
-                        st.warning("⚠️ Nenhum item foi selecionado para entrada!")
-                    else:
-                        count_sucesso = 0
-                        erros = []
-                        for idx_i, item in itens_selecionados.iterrows():
-                            ok, msg = dar_entrada_nota_fiscal(
-                                dados_nfe['numero_nf'],
-                                dados_nfe['fornecedor'],
-                                dados_nfe['cnpj'],
-                                item['produto'],
-                                float(item['quantidade']),
-                                float(item['valor_unitario']),
-                                st.session_state.usuario
-                            )
-                            if ok:
-                                count_sucesso += 1
-                            else:
-                                erros.append(f"Erro no item {item['produto']}: {msg}")
-                        
-                        if count_sucesso > 0:
-                            st.success(f"✅ Entrada concluída! {count_sucesso} itens selecionados foram atualizados/cadastrados.")
-                        if erros:
-                            for err in erros:
-                                st.error(err)
-                        st.rerun()
-            else:
-                st.error(dados_nfe)
-    with aba_manual:
-        with st.form("form_nf_manual", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                num_nf = st.text_input("📄 Número da Nota Fiscal")
-                fornecedor = st.text_input("🏢 Fornecedor / Empresa")
-                cnpj = st.text_input("🆔 CNPJ (Opcional)")
-                nome_prod = st.text_input("📦 Nome do Produto")
-            with c2:
-                qtd_nf = st.number_input("📊 Quantidade Recebida", min_value=0.1, step=1.0)
-                val_unit = st.number_input("💵 Valor Unitário (R$)", min_value=0.0, step=0.01, format="%.2f")
-                st.write(f"💰 **Valor Total Estimado:** R$ {qtd_nf * val_unit:.2f}")
-                
-            if st.form_submit_button("💾 Salvar e Dar Entrada"):
-                if num_nf and fornecedor and nome_prod:
-                    ok, msg = dar_entrada_nota_fiscal(num_nf, fornecedor, cnpj, nome_prod, float(qtd_nf), float(val_unit), st.session_state.usuario)
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
+    if uploaded_xml:
+        ok, res = processar_xml_nfe(uploaded_xml)
+        if ok:
+            st.success("XML Processado com Sucesso!")
+            st.json(res)
+            
+            if st.button("📥 Importar Itens da NF para o Estoque", type="primary"):
+                erros = 0
+                for item in res['itens']:
+                    ok_i, _ = dar_entrada_nota_fiscal(
+                        res['numero_nf'], res['fornecedor'], res['cnpj'],
+                        item['produto'], item['quantidade'], item['valor_unitario'],
+                        st.session_state.usuario
+                    )
+                    if not ok_i:
+                        erros += 1
+                if erros == 0:
+                    st.success("Todos os itens da Nota Fiscal foram importados para o estoque!")
+                else:
+                    st.warning(f"Processamento concluído com {erros} aviso(s).")
+        else:
+            st.error(res)
 
-# --- ABA 6: CONSULTAR NFS SUBIDAS ---
+# --- ABA 6: CONSULTAR NOTAS FISCAIS ---
 elif "Consultar NFs" in opcao:
-    st.title("🧾 Relatório e Consulta de Notas Fiscais Lançadas")
+    st.title("🧾 Histórico de Notas Fiscais Recebidas")
     df_nf = buscar_notas_fiscais()
     if df_nf.empty:
-        st.info("Nenhuma Nota Fiscal cadastrada até o momento.")
+        st.info("Nenhuma Nota Fiscal importada.")
     else:
-        st.subheader("🔍 Filtro de Buscas")
-        c1, c2 = st.columns(2)
-        with c1:
-            busca_nf = st.text_input("Buscar por Número da NF ou Fornecedor:")
-        with c2:
-            busca_prod_nf = st.text_input("Buscar por Produto na NF:")
-            
-        if busca_nf:
-            df_nf = df_nf[df_nf['numero_nf'].astype(str).str.contains(busca_nf, case=False, na=False) | df_nf['fornecedor'].str.contains(busca_nf, case=False, na=False)]
-        if busca_prod_nf:
-            df_nf = df_nf[df_nf['produto_nome'].str.contains(busca_prod_nf, case=False, na=False)]
-            
-        col_t, col_e = st.columns([4, 1])
-        with col_t:
-            st.dataframe(df_nf, use_container_width=True)
-        with col_e:
-            st.download_button(
-                label="📊 Exportar NFs (Excel)",
-                data=gerar_excel_download(df_nf, nome_arquivo="notas_fiscais.xlsx"),
-                file_name="notas_fiscais.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+        st.dataframe(df_nf, use_container_width=True)
 
 # --- ABA 7: IMPORTAR DADOS ---
 elif "Importar Dados" in opcao:
-    st.title("📥 Importação em Lote de Produtos")
-    tab_excel, tab_sheets = st.tabs(["📊 Importar de Planilha Excel (.xlsx)", "🌐 Importar de Google Sheets"])
-    
-    with tab_excel:
-        file_excel = st.file_uploader("Selecione o arquivo .xlsx:", type=["xlsx", "xls"])
-        if file_excel is not None:
-            try:
-                df_imp = pd.read_excel(file_excel)
-                st.dataframe(df_imp, use_container_width=True)
-                if st.button("🚀 Confirmar e Importar para o Banco", type="primary"):
-                    qtd_importados = 0
-                    erros = 0
-                    for idx, row in df_imp.iterrows():
-                        ok, _ = cadastrar_produto(
-                            str(row['nome']),
-                            str(row.get('categoria', 'Geral')),
-                            str(row.get('localizacao', 'Não informada')),
-                            float(row.get('quantidade', 0)),
-                            str(row.get('unidade_medida', 'Unidade')),
-                            int(row.get('qtd_por_caixa', 1)),
-                            codigo_barras=str(row.get('codigo_barras', "")),
-                            ca=str(row.get('ca', "")),
-                            qtd_minima=float(row.get('qtd_minima', 5.0))
-                        )
-                        if ok:
-                            qtd_importados += 1
-                        else:
-                            erros += 1
-                    st.success(f"✅ {qtd_importados} produtos cadastrados com sucesso!")
-                    if erros > 0:
-                        st.warning(f"⚠️ {erros} itens não puderam ser importados.")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao ler arquivo Excel: {e}")
-    with tab_sheets:
-        sheet_id = st.text_input("🆔 ID da Planilha do Google Sheets:")
-        if sheet_id:
-            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-            try:
-                df_gsheets = pd.read_csv(url)
-                st.dataframe(df_gsheets, use_container_width=True)
-                if st.button("🚀 Importar Dados do Google Sheets", type="primary"):
-                    qtd_importados = 0
-                    for idx, row in df_gsheets.iterrows():
-                        cadastrar_produto(
-                            str(row['nome']),
-                            str(row.get('categoria', 'Geral')),
-                            str(row.get('localizacao', 'Não informada')),
-                            float(row.get('quantidade', 0)),
-                            str(row.get('unidade_medida', 'Unidade')),
-                            int(row.get('qtd_por_caixa', 1)),
-                            codigo_barras=str(row.get('codigo_barras', "")),
-                            ca=str(row.get('ca', "")),
-                            qtd_minima=float(row.get('qtd_minima', 5.0))
-                        )
-                        qtd_importados += 1
-                    st.success(f"✅ {qtd_importados} produtos importados!")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao acessar planilha: {e}")
+    st.title("📥 Importação Massiva de Produtos (Excel / CSV)")
+    up_excel = st.file_uploader("Selecione a planilha (.xlsx ou .csv)", type=["xlsx", "csv"])
+    if up_excel:
+        try:
+            df_imp = pd.read_excel(up_excel) if up_excel.name.endswith(".xlsx") else pd.read_csv(up_excel)
+            st.dataframe(df_imp.head())
+            if st.button("🚀 Importar Todos os Registros"):
+                qtd_ok = 0
+                for _, r in df_imp.iterrows():
+                    cadastrar_produto(
+                        str(r.get('nome', '')), str(r.get('categoria', 'Geral')),
+                        str(r.get('localizacao', 'Almoxarifado')), float(r.get('quantidade', 0)),
+                        str(r.get('unidade_medida', 'Unidade')), int(r.get('qtd_por_caixa', 1)),
+                        "", str(r.get('codigo_barras', '')), str(r.get('ca', '')), float(r.get('qtd_minima', 5))
+                    )
+                    qtd_ok += 1
+                st.success(f"{qtd_ok} produtos importados com sucesso!")
+        except Exception as e:
+            st.error(tratar_erro(e))
 
-# --- ABA 8: DASHBOARD BI ---
+# --- ABA 8: DASHBOARD ANALYTICS ---
 elif "Dashboard Analytics" in opcao:
-    st.title("📊 Dashboard Analytics (BI) - Inteligência do Almoxarifado")
-    df_prod = buscar_produtos()
-    df_hist = buscar_historico()
-    df_nf = buscar_notas_fiscais()
-    df_proj = buscar_projetos()
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    with kpi1:
-        st.metric("Total de Produtos", len(df_prod))
-    with kpi2:
-        itens_criticos = len(df_prod[df_prod['quantidade'] <= df_prod['qtd_minima']]) if not df_prod.empty else 0
-        st.metric("Itens com Estoque Baixo", itens_criticos, delta_color="inverse")
-    with kpi3:
-        total_retiradas = len(df_hist[df_hist['tipo'] == 'SAÍDA']) if not df_hist.empty else 0
-        st.metric("Total de Retiradas", total_retiradas)
-    with kpi4:
-        if not df_hist.empty:
-            df_hist['data_hora'] = pd.to_datetime(df_hist['data_hora'])
-            sete_dias_atras = datetime.now() - timedelta(days=7)
-            df_7dias = df_hist[(df_hist['data_hora'] >= sete_dias_atras) & (df_hist['projeto_nome'] != '') & (df_hist['projeto_nome'] != 'Geral / Sem Projeto Específico')]
-            projetos_7d = df_7dias['projeto_nome'].nunique()
-        else:
-            projetos_7d = 0
-        st.metric("Projetos Ativos (Últimos 7 Dias)", projetos_7d)
-    st.write("---")
-    st.subheader("🏗️ Levantamento e Consumo por Projeto")
-    if not df_hist.empty:
-        df_saidas_proj = df_hist[(df_hist['tipo'] == 'SAÍDA') & (df_hist['projeto_nome'] != '')]
-        if not df_saidas_proj.empty:
-            lista_proj_bi = ["Todos os Projetos"] + sorted(df_saidas_proj['projeto_nome'].unique().tolist())
-            proj_filtro = st.selectbox("Selecione um Projeto para Levantamento Detalhado:", lista_proj_bi)
-            
-            if proj_filtro != "Todos os Projetos":
-                df_saidas_proj = df_saidas_proj[df_saidas_proj['projeto_nome'] == proj_filtro]
-            
-            st.write(f"📦 **Materiais Retirados para o Projeto:**")
-            lev_proj = df_saidas_proj.groupby(['produto', 'nome_retirou'])['quantidade'].sum().reset_index()
-            st.dataframe(lev_proj, use_container_width=True)
-            st.bar_chart(df_saidas_proj.groupby('produto')['quantidade'].sum())
-        else:
-            st.info("Nenhuma saída vinculada a projetos no histórico.")
-    else:
-        st.info("Sem dados de histórico de retiradas.")
-    st.write("---")
-    st.subheader("💰 Análise Financeira de Gastos e Comparação por Períodos")
-    if not df_nf.empty:
-        df_nf['data_recebimento'] = pd.to_datetime(df_nf['data_recebimento'])
-        tab_periodo, tab_comparativo = st.tabs(["📅 Gastos em Período Específico", "📈 Comparativo entre Períodos / 12 Meses"])
-        
-        with tab_periodo:
-            col_d1, col_d2 = st.columns(2)
-            with col_d1:
-                data_inicio = st.date_input("Data Inicial:", df_nf['data_recebimento'].min().date())
-            with col_d2:
-                data_fim = st.date_input("Data Final:", df_nf['data_recebimento'].max().date())
-            
-            mask = (df_nf['data_recebimento'].dt.date >= data_inicio) & (df_nf['data_recebimento'].dt.date <= data_fim)
-            df_filtrado = df_nf[mask]
-            valor_total_gastos = df_filtrado['valor_total'].sum()
-            
-            st.metric("Total Gasto no Período Selecionado", f"R$ {valor_total_gastos:,.2f}")
-            st.dataframe(df_filtrado[['numero_nf', 'fornecedor', 'produto_nome', 'quantidade', 'valor_unitario', 'valor_total', 'data_recebimento']], use_container_width=True)
-        with tab_comparativo:
-            modo_comp = st.radio("Selecione o Tipo de Comparação:", ["Últimos 12 Meses", "Comparar Dois Períodos Customizados"], horizontal=True)
-            if modo_comp == "Últimos 12 Meses":
-                df_nf['Ano_Mês'] = df_nf['data_recebimento'].dt.to_period('M')
-                gastos_mensais = df_nf.groupby('Ano_Mês')['valor_total'].sum().reset_index()
-                gastos_mensais['Ano_Mês'] = gastos_mensais['Ano_Mês'].astype(str)
-                gastos_mensais = gastos_mensais.tail(12)
-                st.bar_chart(gastos_mensais.set_index('Ano_Mês'))
-            else:
-                st.write("**Período A:**")
-                ca1, ca2 = st.columns(2)
-                with ca1:
-                    p1_ini = st.date_input("Início Período A", df_nf['data_recebimento'].min().date(), key="p1_ini")
-                with ca2:
-                    p1_fim = st.date_input("Fim Período A", df_nf['data_recebimento'].max().date(), key="p1_fim")
-                
-                st.write("**Período B:**")
-                cb1, cb2 = st.columns(2)
-                with cb1:
-                    p2_ini = st.date_input("Início Período B", df_nf['data_recebimento'].min().date(), key="p2_ini")
-                with cb2:
-                    p2_fim = st.date_input("Fim Período B", df_nf['data_recebimento'].max().date(), key="p2_fim")
-                    
-                gasto_a = df_nf[(df_nf['data_recebimento'].dt.date >= p1_ini) & (df_nf['data_recebimento'].dt.date <= p1_fim)]['valor_total'].sum()
-                gasto_b = df_nf[(df_nf['data_recebimento'].dt.date >= p2_ini) & (df_nf['data_recebimento'].dt.date <= p2_fim)]['valor_total'].sum()
-                
-                col_mc1, col_mc2 = st.columns(2)
-                col_mc1.metric("Gasto Período A", f"R$ {gasto_a:,.2f}")
-                col_mc2.metric("Gasto Período B", f"R$ {gasto_b:,.2f}", delta=f"R$ {gasto_b - gasto_a:,.2f}", delta_color="inverse")
-    else:
-        st.info("Nenhuma Nota Fiscal cadastrada para exibição de dados financeiros.")
-
-# --- ABA 9: HISTÓRICO E ESTORNO ---
-elif "Histórico / Auditoria" in opcao:
-    st.title("📜 Histórico e Auditoria de Movimentações (Retenção 18 Meses)")
-    df_hist = buscar_historico()
-    col_h1, col_h2 = st.columns([4, 1])
-    with col_h1:
-        st.dataframe(df_hist, use_container_width=True)
-    with col_h2:
-        if not df_hist.empty:
-            st.download_button(
-                label="📊 Exportar Excel",
-                data=gerar_excel_download(df_hist),
-                file_name="historico_movimentacoes.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-    st.write("---")
-    st.subheader("↩️ Estorno / Correção dos Últimos Registros")
-    if not df_hist.empty:
-        ultimos_10 = df_hist.head(10)
-        for idx, row in ultimos_10.iterrows():
-            col_info, col_btn = st.columns([4, 1])
-            with col_info:
-                st.write(f"🆔 **ID #{row['id']}** | Item: '{row['produto']}' | Retirou: `{row['nome_retirou']}` | Projeto: `{row['projeto_nome']}` | Qtd: `{row['quantidade']}` | Data: '{row['data_hora']}'")
-            with col_btn:
-                desabilitado = "ESTORNO" in str(row['tipo']).upper()
-                if st.button(f"↩️ Estornar #{row['id']}", key=f"estorno_{row['id']}", disabled=desabilitado):
-                    try:
-                        ok, msg = estornar_movimentacao(int(row['id']), st.session_state.usuario)
-                        if ok:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    except Exception as err:
-                        st.error(f"Erro inesperado ao realizar o estorno: {err}")
-
-# --- ABA 10: GERENCIAR USUÁRIOS (ADMIN) ---
-elif "Gerenciar Usuários" in opcao and st.session_state.perfil == "Admin":
-    st.title("👥 Gerenciamento de Usuários e Monitoramento")
-    df_usr = buscar_usuarios()
-    st.subheader("🌐 Status dos Usuários Online e Atividades")
-    st.dataframe(df_usr[['id', 'usuario', 'perfil', 'status_online', 'ultima_atividade', 'localizacao_sessao', 'acao_atual']], use_container_width=True)
+    st.title("📊 Dashboard e Métricas do Almoxarifado")
+    df_p = buscar_produtos()
+    df_h = buscar_historico()
     
-    st.write("---")
-    st.subheader("✏️ Editar Usuário / Redefinir Senha")
-    user_edit_id = st.selectbox("Selecione o Usuário para Editar:", df_usr['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_usr[df_usr['id']==x]['usuario'].values[0]}")
-    if user_edit_id:
-        usr_row = df_usr[df_usr['id'] == user_edit_id].iloc[0]
-        with st.form("form_edit_usr", clear_on_submit=True):
-            ed_u_nome = st.text_input("👤 Nome do Usuário", value=usr_row['usuario'])
-            ed_u_perfil = st.selectbox("🛡️ Perfil de Acesso", ["Operador", "Admin"], index=["Operador", "Admin"].index(usr_row['perfil']))
-            ed_u_senha = st.text_input("🔑 Nova Senha (Deixe em branco para manter a senha atual)", type="password")
-            
-            if st.form_submit_button("💾 Salvar Alterações no Usuário"):
-                ok, msg = editar_usuario(user_edit_id, ed_u_nome, ed_u_perfil, ed_u_senha)
+    if not df_p.empty:
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Total de Cadastros", len(df_p))
+        k2.metric("Itens Zerados", len(df_p[df_p['quantidade'] <= 0]))
+        k3.metric("Itens Críticos", len(df_p[df_p['quantidade'] <= df_p['qtd_minima']]))
+        
+        st.write("---")
+        fig, ax = plt.subplots()
+        df_p.groupby('categoria')['quantidade'].sum().plot(kind='bar', ax=ax)
+        ax.set_title("Quantidade por Categoria")
+        st.pyplot(fig)
+
+# --- ABA 9: HISTÓRICO E AUDITORIA ---
+elif "Histórico / Auditoria" in opcao:
+    st.title("📜 Histórico Geral e Auditoria de Operações")
+    df_h = buscar_historico()
+    
+    if df_h.empty:
+        st.info("Nenhum registro de movimentação encontrado.")
+    else:
+        st.dataframe(df_h, use_container_width=True)
+        if st.session_state.perfil == "Admin":
+            st.write("---")
+            st.subheader("⚠️ Estorno de Movimentação")
+            id_est = st.number_input("Digite o ID do Histórico para Estornar:", min_value=1, step=1)
+            if st.button("Estornar Movimentação"):
+                ok, msg = estornar_movimentacao(id_est, st.session_state.usuario)
                 if ok:
                     st.success(msg)
                     st.rerun()
                 else:
                     st.error(msg)
-    st.write("---")
-    st.subheader("➕ Cadastrar Novo Usuário")
-    with st.form("form_cad_usr", clear_on_submit=True):
-        u_nome = st.text_input("👤 Nome do Usuário")
-        u_senha = st.text_input("🔑 Senha", type="password")
-        u_perfil = st.selectbox("🛡️ Perfil de Acesso", ["Operador", "Admin"])
-        
-        if st.form_submit_button("➕ Cadastrar Usuário"):
-            ok, msg = cadastrar_usuario(u_nome, u_senha, u_perfil)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
 
-# --- ABA 11: PERSONALIZAR EMPRESA (ADMIN) ---
-elif "Personalizar Empresa" in opcao and st.session_state.perfil == "Admin":
-    st.title("🎨 Configurações da Empresa e Layout")
-    with st.form("form_cfg", clear_on_submit=True):
-        e_nome = st.text_input("🏢 Nome da Empresa", value=config['nome_empresa'])
-        e_cor = st.color_picker("🎨 Cor do Tema", value=config['cor_tema'])
-        e_logo = st.file_uploader("🖼️ Atualizar Logomarca (Imagem)", type=["png", "jpg", "jpeg"])
-        e_mapa = st.file_uploader("🗺️ Atualizar Mapa do Almoxarifado (PDF ou Imagem)", type=["pdf", "png", "jpg", "jpeg"])
-        
-        if st.form_submit_button("💾 Salvar Configurações"):
-            logo_p = config['logo_path']
-            mapa_p = config['mapa_path']
-            if e_logo is not None:
-                logo_p = salvar_arquivo_seguro(e_logo, tipo="imagem")
-            if e_mapa is not None:
-                mapa_p = salvar_arquivo_seguro(e_mapa, tipo="mapa")
-                
-            ok, msg = salvar_configuracoes(e_nome, logo_p, e_cor, mapa_p)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-# --- ABA 12: FOX ASSISTENTE (GEMINI AI) ---
-elif "Fox Assistente" in opcao:
-    st.title("🦊 Fox Assistente - Almoxarifado Inteligente")
-    st.caption("Sua assistente integrada que lê o banco de dados, compara preços, analisa BI e tira dúvidas!")
+# --- ABA 10: GERENCIAR USUÁRIOS ---
+elif "Gerenciar Usuários" in opcao:
+    st.title("👥 Gerenciamento e Monitoramento de Usuários")
+    df_u = buscar_usuarios()
+    st.dataframe(df_u, use_container_width=True)
     
-    if not client_gemini:
-        st.error("Chave de API do Gemini não configurada em .streamlit/secrets.toml (GEMINI_API_KEY).")
-    else:
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
+    with st.form("form_cad_u", clear_on_submit=True):
+        st.subheader("➕ Novo Usuário")
+        u_nome = st.text_input("Usuário")
+        u_pass = st.text_input("Senha", type="password")
+        u_perf = st.selectbox("Perfil", ["Admin", "Operador"])
+        if st.form_submit_button("Cadastrar Usuário"):
+            ok, msg = cadastrar_usuario(u_nome, u_pass, u_perf)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+# --- ABA 11: PERSONALIZAR EMPRESA ---
+elif "Personalizar Empresa" in opcao:
+    st.title("🎨 Configurações Gerais e Personalização")
+    with st.form("form_cfg"):
+        nome_emp = st.text_input("Nome da Empresa", value=config['nome_empresa'])
+        cor_t = st.color_picker("Cor do Tema", value=config['cor_tema'])
+        up_logo = st.file_uploader("Logo da Empresa", type=["png", "jpg", "jpeg"])
+        up_mapa = st.file_uploader("Mapa / Planta do Almoxarifado", type=["pdf", "png", "jpg"])
+        
+        if st.form_submit_button("Salvar Configurações"):
+            logo_path = config['logo_path']
+            mapa_path = config['mapa_path']
             
-        df_p_ctx = buscar_produtos()
-        df_nf_ctx = buscar_notas_fiscais()
-        df_hist_ctx = buscar_historico()
-        
-        resumo_produtos = df_p_ctx[['nome', 'quantidade', 'unidade_medida', 'localizacao']].to_string(index=False) if not df_p_ctx.empty else "Nenhum produto"
-        resumo_precos = df_nf_ctx[['produto_nome', 'fornecedor', 'valor_unitario', 'valor_total', 'data_recebimento']].head(20).to_string(index=False) if not df_nf_ctx.empty else "Nenhuma nota fiscal"
-        resumo_saidas = df_hist_ctx[['produto', 'quantidade', 'nome_retirou', 'projeto_nome', 'data_hora']].head(20).to_string(index=False) if not df_hist_ctx.empty else "Nenhum histórico"
-        
-        FOX_SYSTEM_INSTRUCTION_DINAMICO = f"""
-Você é a Fox Assistente, a inteligência virtual simpática e especialista do Sistema de Almoxarifado! 🦊✨
-### VISÃO GERAL DAS OPERAÇÕES DO SISTEMA:
-1. **Consulta de Estoque:** Exibe produtos, quantidades, localizações e avisa quando itens estão com nível crítico ou zerados.
-2. **Pedidos de Compras:** Gera automaticamente listas de reposição com sugestão de compra em Excel.
-3. **Gestão de Projetos e Equipe:** Permite cadastrar obras/projetos, funcionários e atribuir colaboradores para rastrear o uso dos materiais.
-4. **Biblioteca de Desenhos / Projetos:** Anexa, consulta, altera e remove plantas e projetos em PDF.
-5. **Checklist de Ferramentas:** Ferramenta diária para fiscalizar o estado operacional de ferramentas, associar a funcionários e projetos, e gerar relatórios em PDF.
-6. **Retirada / Devolução:** Registra saída/entrada de materiais exigindo obrigatoriamente o Nome de quem retirou, Projeto e responsável por EPI.
-7. **Entrada de NF:** Importa arquivos XML de NFe ou faz lançamentos manuais com atualização instantânea de saldo e preço.
-8. **Dashboard Analytics (BI):** Apresenta comparativos de gastos por período (até 12 meses), levantamento de custos por projeto e ranking dos top 10 itens retirados.
-9. **Histórico e Retenção:** Guarda histórico completo com limpeza automática de registros superiores a 18 meses.
----
-### TABELAS E DADOS EM TEMPO REAL DO ALMOXARIFADO:
-**1. TABELA DE PRODUTOS E ESTOQUE:**
-{resumo_produtos}
-**2. TABELA DE PREÇOS E NOTAS FISCAIS (COMPRAS):**
-{resumo_precos}
-**3. ÚLTIMAS RETIRADAS E PROJETOS:**
-{resumo_saidas}
----
-Sua missão:
-- Responder às dúvidas dos usuários com clareza e empatia.
-- Ler os dados de preços fornecidos acima para fazer comparativos de custos e sugerir economias.
-- Explicar métricas e indicar insights para o BI.
-"""
-        for msg in st.session_state.chat_history:
-            avatar_icon = "🦊" if msg["role"] == "assistant" else "👤"
-            with st.chat_message(msg["role"], avatar=avatar_icon):
-                st.markdown(msg["content"])
-        if prompt := st.chat_input("Pergunte sobre preços, produtos, projetos ou relatórios do BI:"):
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.chat_message("user", avatar="👤"):
-                st.markdown(prompt)
+            if up_logo:
+                logo_path = salvar_arquivo_seguro(up_logo, tipo="imagem")
+            if up_mapa:
+                mapa_path = salvar_arquivo_seguro(up_mapa, tipo="mapa")
                 
+            ok, msg = salvar_configuracoes(nome_emp, logo_path, cor_t, mapa_path)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+# --- ABA 12: FOX ASSISTENTE (GEMINI) ---
+elif "Fox Assistente" in opcao:
+    st.title("🦊 Fox Assistente IA")
+    if not client_gemini:
+        st.warning("Chave de API do Gemini não configurada nos secrets (`GEMINI_API_KEY`).")
+    else:
+        prompt = st.text_area("Pergunte algo sobre o seu estoque ou peça uma análise:")
+        if st.button("Enviar para a Fox IA", type="primary"):
             try:
-                conteudo_envio = f"{FOX_SYSTEM_INSTRUCTION_DINAMICO}\n\nPergunta do usuário: {prompt}"
-                response = client_gemini.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=conteudo_envio,
+                df_p = buscar_produtos()
+                res = client_gemini.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=f"Você é a Fox Assistente de Almoxarifado. Dados atuais do estoque: {df_p.to_dict(orient='records')}. Pergunta do usuário: {prompt}"
                 )
-                
-                resposta = response.text
-                st.session_state.chat_history.append({"role": "assistant", "content": resposta})
-                with st.chat_message("assistant", avatar="🦊"):
-                    st.markdown(resposta)
+                st.write(res.text)
             except Exception as e:
-                st.error(f"Erro ao conversar com a Fox Assistente: {e}")
+                st.error(tratar_erro(e))
