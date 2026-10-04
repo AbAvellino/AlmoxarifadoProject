@@ -45,7 +45,7 @@ class AppError(Exception):
 def tratar_erro(e: Exception) -> str:
     """Padroniza e formata mensagens de erro para exibição no Streamlit."""
     if isinstance(e, AppError):
-        return f"⚠️️ [{e.code}] {e.message}"
+        return f"⚠ [{e.code}] {e.message}"
     elif isinstance(e, psycopg2.Error):
         return f"❌ [ERRO_BANCO] Falha na operação de banco de dados: {str(e)}"
     else:
@@ -1273,7 +1273,7 @@ elif "Biblioteca de Desenhos" in opcao:
                         st.markdown("**Ações do Item:**")
                         if st.button("✏️ Alterar", key=f"btn_alt_{row_pdf['id']}"):
                             st.session_state[f"edit_mode_{row_pdf['id']}"] = True
-                        if st.button("🗑️ Excluir", key=f"btn_exc_{row_pdf['id']}", type="secondary"):
+                        if st.button("🗑️️ Excluir", key=f"btn_exc_{row_pdf['id']}", type="secondary"):
                             st.session_state[f"del_mode_{row_pdf['id']}"] = True
                     
                     if st.session_state.get(f"edit_mode_{row_pdf['id']}", False):
@@ -1873,272 +1873,252 @@ elif "Importar Dados" in opcao:
                             p_ca = str(r.get('ca', ''))
                             p_min = float(r.get('qtd_minima', 5.0))
                             
-                            cursor.execute("SELECT id, quantidade FROM produtos WHERE LOWER(nome) = LOWER(%s)", (p_nome,))
-                            res_p = cursor.fetchone()
-                            if res_p:
-                                cursor.execute("UPDATE produtos SET quantidade = quantidade + %s WHERE id = %s", (p_qtd, res_p[0]))
+                            cursor.execute("SELECT id FROM produtos WHERE LOWER(nome) = LOWER(%s)", (p_nome,))
+                            res = cursor.fetchone()
+                            if res:
+                                cursor.execute("""
+                                UPDATE produtos SET quantidade = quantidade + %s, categoria = %s, localizacao = %s, unidade_medida = %s, qtd_por_caixa = %s, codigo_barras = %s, ca = %s, qtd_minima = %s WHERE id = %s
+                                """, (p_qtd, p_cat, p_loc, p_un, p_cx, p_barras, p_ca, p_min, res[0]))
                                 atualizados += 1
                             else:
-                                cursor.execute(
-                                    "INSERT INTO produtos (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, codigo_barras, ca, qtd_minima) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                                    (p_nome, p_cat, p_loc, p_qtd, p_un, p_cx, p_barras, p_ca, p_min)
-                                )
+                                cursor.execute("""
+                                INSERT INTO produtos (nome, categoria, localizacao, quantidade, unidade_medida, qtd_por_caixa, codigo_barras, ca, qtd_minima) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                """, (p_nome, p_cat, p_loc, p_qtd, p_un, p_cx, p_barras, p_ca, p_min))
                                 cadastrados += 1
                         conn.commit()
                         st.cache_data.clear()
-                        st.success(f"🎉 Processamento concluído! Novas inserções: {cadastrados} | Quantidades incrementadas: {atualizados}")
-                        st.rerun()
+                    st.success(f"🎉 Processamento concluído! {cadastrados} novos itens inseridos e {atualizados} atualizados.")
         except Exception as e:
-            st.error(f"Erro ao ler a planilha: {tratar_erro(e)}")
+            st.error(f"Erro ao processar planilha: {e}")
 
 # --- ABA 8: DASHBOARD ANALYTICS (BI) ---
 elif "Dashboard Analytics" in opcao:
-    st.title("📊 Dashboard Analytics e Business Intelligence (BI)")
-    st.caption("Visão estratégica do fluxo de entrada e saída de materiais por dia, mês, semestre, ano e projeto.")
-    
+    st.title("📊 Dashboard Analytics e Inteligência BI")
+    st.caption("Acompanhe os gastos, movimentações e quem mais retira materiais no almoxarifado.")
+
     df_hist = buscar_historico()
-    
+    df_prod = buscar_produtos()
+
     if df_hist.empty:
-        st.info("Nenhuma movimentação registrada no histórico para gerar gráficos.")
+        st.info("Ainda não há dados de movimentação para exibir o Analytics.")
     else:
-        df_bi = df_hist.copy()
-        df_bi['data_hora'] = pd.to_datetime(df_bi['data_hora'])
-        
-        # Criação de colunas temporais e normalização do fluxo
-        df_bi['Dia'] = df_bi['data_hora'].dt.strftime('%Y-%m-%d')
-        df_bi['Mês/Ano'] = df_bi['data_hora'].dt.strftime('%Y-%m')
-        df_bi['Semestre'] = df_bi['data_hora'].apply(lambda x: f"{x.year}-S1" if x.month <= 6 else f"{x.year}-S2")
-        df_bi['Ano'] = df_bi['data_hora'].dt.strftime('%Y')
-        df_bi['Projeto'] = df_bi['projeto_nome'].apply(lambda x: x if x and str(x).strip() != '' else "Geral / Sem Projeto")
-        
-        def categorizar_fluxo(tipo):
-            t = str(tipo).upper()
-            if "ENTRADA" in t or "DEVOLUÇÃO" in t or "DEVOLUCAO" in t:
-                return "ENTRADA"
-            elif "SAÍDA" in t or "SAIDA" in t:
-                return "SAÍDA"
+        df_hist['data_hora'] = pd.to_datetime(df_hist['data_hora'])
+        df_saidas = df_hist[df_hist['tipo'].str.contains('SAÍDA|SAIDA', case=False, na=False)].copy()
+
+        # Filtros no Topo do BI
+        st.subheader("🔍 Filtros Dinâmicos")
+        col_f1, col_f2, col_f3 = st.columns(3)
+        with col_f1:
+            visao_tempo = st.selectbox("Visualizar Consumo Por:", ["Dia", "Mês"])
+        with col_f2:
+            lista_projs = ["Todos os Projetos"] + [p for p in df_saidas['projeto_nome'].unique() if p]
+            filtro_proj_bi = st.selectbox("Filtrar por Projeto:", lista_projs)
+        with col_f3:
+            lista_cats = ["Todas as Categorias"] + [c for c in df_saidas['categoria'].unique() if c]
+            filtro_cat_bi = st.selectbox("Filtrar por Categoria:", lista_cats)
+
+        # Aplicar Filtros
+        if filtro_proj_bi != "Todos os Projetos":
+            df_saidas = df_saidas[df_saidas['projeto_nome'] == filtro_proj_bi]
+        if filtro_cat_bi != "Todas as Categorias":
+            df_saidas = df_saidas[df_saidas['categoria'] == filtro_cat_bi]
+
+        st.write("---")
+
+        # KPIs Principais
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        with kpi1:
+            st.metric("Total de Saídas / Retiradas", f"{len(df_saidas)} ops")
+        with kpi2:
+            total_itens_retirados = df_saidas['quantidade'].sum()
+            st.metric("Total de Itens Retirados", f"{total_itens_retirados:,.2f}")
+        with kpi3:
+            retirante_top = df_saidas['nome_retirou'].replace('', 'Não informado').value_counts().index[0] if not df_saidas.empty else "N/A"
+            st.metric("Maior Retirante", retirante_top)
+        with kpi4:
+            cat_top = df_saidas['categoria'].value_counts().index[0] if not df_saidas.empty else "N/A"
+            st.metric("Categoria Mais Utilizada", cat_top)
+
+        st.write("---")
+
+        # Gráficos em Colunas
+        col_g1, col_g2 = st.columns(2)
+
+        with col_g1:
+            st.subheader("👤 Quem Mais Retira Itens")
+            if not df_saidas.empty:
+                df_quem = df_saidas.groupby('nome_retirou')['quantidade'].sum().reset_index()
+                df_quem['nome_retirou'] = df_quem['nome_retirou'].replace('', 'Não Identificado')
+                df_quem = df_quem.sort_values(by='quantidade', ascending=False).head(10)
+
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.barh(df_quem['nome_retirou'], df_quem['quantidade'], color=config['cor_tema'])
+                ax.invert_yaxis()
+                ax.set_xlabel("Quantidade Retirada")
+                st.pyplot(fig)
             else:
-                return "OUTROS"
-                
-        df_bi['Fluxo'] = df_bi['tipo'].apply(categorizar_fluxo)
-        df_bi_valida = df_bi[df_bi['Fluxo'].isin(['ENTRADA', 'SAÍDA'])].copy()
-        
-        st.subheader("🔍 Filtros de Análise Temporal e por Projeto")
-        col_bi1, col_bi2, col_bi3 = st.columns(3)
-        
-        with col_bi1:
-            anos_disp = ["Todos"] + sorted(df_bi_valida['Ano'].unique().tolist(), reverse=True)
-            sel_ano = st.selectbox("Filtrar por Ano:", anos_disp)
-        with col_bi2:
-            projs_disp = ["Todos"] + sorted(df_bi_valida['Projeto'].unique().tolist())
-            sel_proj = st.selectbox("Filtrar por Projeto:", projs_disp)
-        with col_bi3:
-            agrupamento = st.selectbox("Agrupar Visão Temporal por:", ["Dia", "Mês/Ano", "Semestre", "Ano"])
-            
-        if sel_ano != "Todos":
-            df_bi_valida = df_bi_valida[df_bi_valida['Ano'] == sel_ano]
-        if sel_proj != "Todos":
-            df_bi_valida = df_bi_valida[df_bi_valida['Projeto'] == sel_proj]
-            
+                st.write("Sem dados de saída para os filtros selecionados.")
+
+        with col_g2:
+            st.subheader("📦 Consumo / Gastos por Categoria")
+            if not df_saidas.empty:
+                df_cat_gasto = df_saidas.groupby('categoria')['quantidade'].sum().reset_index()
+                df_cat_gasto = df_cat_gasto.sort_values(by='quantidade', ascending=False)
+
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.pie(df_cat_gasto['quantidade'], labels=df_cat_gasto['categoria'], autopct='%1.1f%%', startangle=90)
+                st.pyplot(fig)
+            else:
+                st.write("Sem dados para os filtros selecionados.")
+
         st.write("---")
-        
-        # Indicadores Chave (KPIs)
-        total_entradas = df_bi_valida[df_bi_valida['Fluxo'] == 'ENTRADA']['quantidade'].sum()
-        total_saidas = df_bi_valida[df_bi_valida['Fluxo'] == 'SAÍDA']['quantidade'].sum()
-        saldo_movimentado = total_entradas - total_saidas
-        
-        kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
-        with kpi_col1:
-            st.metric("Total de Entradas/Devoluções", f"{total_entradas:,.2f}")
-        with kpi_col2:
-            st.metric("Total de Saídas", f"{total_saidas:,.2f}")
-        with kpi_col3:
-            st.metric("Balanço Líquido do Período", f"{saldo_movimentado:,.2f}")
-            
-        st.write("---")
-        
-        tab_graf1, tab_graf2, tab_tabela = st.tabs([
-            "📈 Entradas vs Saídas por Período", 
-            "🏗️ Fluxo por Projeto", 
-            "📋 Tabela Consolidada"
-        ])
-        
-        with tab_graf1:
-            st.subheader(f"Fluxo de Entradas e Saídas Agrupado por {agrupamento}")
-            pivot_temp = df_bi_valida.pivot_table(
-                index=agrupamento, 
-                columns='Fluxo', 
-                values='quantidade', 
-                aggfunc='sum', 
-                fill_value=0
-            )
-            for col in ['ENTRADA', 'SAÍDA']:
-                if col not in pivot_temp.columns:
-                    pivot_temp[col] = 0.0
-                    
-            fig1, ax1 = plt.subplots(figsize=(10, 4))
-            pivot_temp[['ENTRADA', 'SAÍDA']].plot(kind='bar', ax=ax1, color=['#2ea44f', '#cb2431'])
-            ax1.set_ylabel("Quantidade Movimentada")
-            ax1.set_xlabel(agrupamento)
-            plt.xticks(rotation=45)
-            st.pyplot(fig1)
-            
-        with tab_graf2:
-            st.subheader("Entradas e Saídas de Materiais por Projeto")
-            pivot_proj = df_bi_valida.pivot_table(
-                index='Projeto', 
-                columns='Fluxo', 
-                values='quantidade', 
-                aggfunc='sum', 
-                fill_value=0
-            )
-            for col in ['ENTRADA', 'SAÍDA']:
-                if col not in pivot_proj.columns:
-                    pivot_proj[col] = 0.0
-                    
-            fig2, ax2 = plt.subplots(figsize=(10, 4))
-            pivot_proj[['ENTRADA', 'SAÍDA']].plot(kind='barh', ax=ax2, color=['#2ea44f', '#cb2431'])
-            ax2.set_xlabel("Quantidade Movimentada")
-            st.pyplot(fig2)
-            
-        with tab_tabela:
-            st.subheader("Valores Consolidados de Entradas e Saídas")
-            pivot_completa = df_bi_valida.pivot_table(
-                index=['Projeto', agrupamento], 
-                columns='Fluxo', 
-                values='quantidade', 
-                aggfunc='sum', 
-                fill_value=0
-            ).reset_index()
-            
-            for col in ['ENTRADA', 'SAÍDA']:
-                if col not in pivot_completa.columns:
-                    pivot_completa[col] = 0.0
-                    
-            pivot_completa['Saldo Líquido'] = pivot_completa['ENTRADA'] - pivot_completa['SAÍDA']
-            st.dataframe(pivot_completa, use_container_width=True)
-            
-            st.download_button(
-                label="⬇️ Exportar Dados Consolidados do BI (.XLSX)",
-                data=gerar_excel_download(pivot_completa, "bi_entradas_saidas.xlsx"),
-                file_name="bi_entradas_saidas.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+        col_g3, col_g4 = st.columns(2)
+
+        with col_g3:
+            st.subheader("🏗️ Consumo por Projetos")
+            if not df_saidas.empty:
+                df_proj_gasto = df_saidas.groupby('projeto_nome')['quantidade'].sum().reset_index()
+                df_proj_gasto['projeto_nome'] = df_proj_gasto['projeto_nome'].replace('', 'Sem Projeto')
+                df_proj_gasto = df_proj_gasto.sort_values(by='quantidade', ascending=False)
+
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.bar(df_proj_gasto['projeto_nome'], df_proj_gasto['quantidade'], color="#4CAF50")
+                plt.xticks(rotation=45, ha='right')
+                ax.set_ylabel("Total de Itens Utilizados")
+                st.pyplot(fig)
+            else:
+                st.write("Sem dados para os filtros selecionados.")
+
+        with col_g4:
+            st.subheader(f"📅 Evolução do Consumo por {visao_tempo}")
+            if not df_saidas.empty:
+                df_temp = df_saidas.copy()
+                if visao_tempo == "Dia":
+                    df_temp['Periodo'] = df_temp['data_hora'].dt.strftime('%Y-%m-%d')
+                else:
+                    df_temp['Periodo'] = df_temp['data_hora'].dt.strftime('%Y-%m')
+
+                df_evolucao = df_temp.groupby('Periodo')['quantidade'].sum().reset_index()
+
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.plot(df_evolucao['Periodo'], df_evolucao['quantidade'], marker='o', color="#FF9800", linewidth=2)
+                plt.xticks(rotation=45, ha='right')
+                ax.set_ylabel("Qtd de Itens Retirados")
+                ax.grid(True, linestyle='--', alpha=0.5)
+                st.pyplot(fig)
+            else:
+                st.write("Sem dados para os filtros selecionados.")
 
 # --- ABA 9: HISTÓRICO / AUDITORIA ---
 elif "Histórico / Auditoria" in opcao:
-    st.title("📜 Histórico de Movimentações & Auditoria de Operações")
-    df_hist = buscar_historico()
+    st.title("📜 Histórico Geral e Trilha de Auditoria")
+    st.caption("Acompanhe todas as movimentações efetuadas com opção de estorno de lançamento.")
     
+    df_hist = buscar_historico()
     if df_hist.empty:
-        st.info("Nenhuma movimentação foi registrada ainda.")
+        st.info("Nenhuma movimentação registrada.")
     else:
         st.dataframe(df_hist, use_container_width=True)
         
-        st.write("---")
-        st.subheader("↩️ Estorno de Movimentações Incorretas")
-        estorno_id = st.number_input("Digite o ID da Movimentação (#ID) que deseja estornar:", min_value=1, step=1)
-        if st.button("🔄 Executar Estorno do Registro", type="secondary"):
-            ok_est, msg_est = estornar_movimentacao(estorno_id, st.session_state.usuario)
-            if ok_est:
-                st.success(msg_est)
-                st.rerun()
-            else:
-                st.error(msg_est)
+        if st.session_state.perfil == "Admin":
+            st.write("---")
+            st.subheader("↩️ Estornar Movimentação do Histórico")
+            estorno_id = st.number_input("Informe o ID da Movimentação para Estornar:", min_value=1, step=1)
+            if st.button(" Estornar Movimentação", type="primary"):
+                ok, msg = estornar_movimentacao(estorno_id, st.session_state.usuario)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
 # --- ABA 10: GERENCIAR USUÁRIOS ---
 elif "Gerenciar Usuários" in opcao:
-    st.title("👥 Gerenciamento de Usuários & Status da Sessão")
+    st.title("👥 Gerenciamento de Usuários e Permissões")
     df_users = buscar_usuarios()
     
-    st.subheader("📋 Usuários Cadastrados e Presença em Tempo Real")
+    st.subheader("📋 Usuários Cadastrados")
     st.dataframe(df_users, use_container_width=True)
     
     st.write("---")
-    tab_usr_cad, tab_usr_edit = st.tabs(["➕ Cadastrar Novo Usuário", "✏️ Editar Usuário Existente"])
+    tab_cad_user, tab_edit_user = st.tabs(["➕ Cadastrar Usuário", "✏️ Editar Usuário"])
     
-    with tab_usr_cad:
-        with st.form("form_novo_usuario_admin", clear_on_submit=True):
-            n_usr = st.text_input("Novo Usuário *")
+    with tab_cad_user:
+        with st.form("form_novo_usuario", clear_on_submit=True):
+            n_usr = st.text_input("Nome do Usuário *")
             n_pwd = st.text_input("Senha *", type="password")
-            n_perf = st.selectbox("Perfil de Acesso", ["Operador", "Admin"])
+            n_prf = st.selectbox("Perfil de Acesso", ["Operador", "Admin"])
             if st.form_submit_button("💾 Salvar Usuário", type="primary"):
                 if n_usr.strip() and n_pwd.strip():
-                    ok_u, msg_u = cadastrar_usuario(n_usr.strip(), n_pwd.strip(), n_perf)
-                    if ok_u:
-                        st.success(msg_u)
+                    ok, msg = cadastrar_usuario(n_usr.strip(), n_pwd.strip(), n_prf)
+                    if ok:
+                        st.success(msg)
                         st.rerun()
                     else:
-                        st.error(msg_u)
+                        st.error(msg)
                 else:
                     st.warning("Usuário e Senha são obrigatórios.")
                     
-    with tab_usr_edit:
-        if not df_users.empty:
-            sel_u_id = st.selectbox("Selecione o Usuário p/ Alterar:", df_users['id'].tolist(), format_func=lambda x: f"{df_users[df_users['id']==x]['usuario'].values[0]} ({df_users[df_users['id']==x]['perfil'].values[0]})")
-            u_row = df_users[df_users['id'] == sel_u_id].iloc[0]
-            
-            with st.form("form_edit_usuario_admin", clear_on_submit=True):
+    with tab_edit_user:
+        u_sel_id = st.selectbox("Selecione o Usuário para Editar:", df_users['id'].tolist(), format_func=lambda x: f"ID #{x} - {df_users[df_users['id']==x]['usuario'].values[0]}")
+        if u_sel_id:
+            u_row = df_users[df_users['id'] == u_sel_id].iloc[0]
+            with st.form("form_edit_usuario", clear_on_submit=True):
                 ed_u_nome = st.text_input("Nome do Usuário", value=u_row['usuario'])
-                ed_u_perfil = st.selectbox("Perfil", ["Operador", "Admin"], index=0 if u_row['perfil'] == "Operador" else 1)
-                ed_u_pwd = st.text_input("Nova Senha (Deixe em branco para manter a atual)", type="password")
+                ed_u_perf = st.selectbox("Perfil", ["Operador", "Admin"], index=["Operador", "Admin"].index(u_row['perfil']) if u_row['perfil'] in ["Operador", "Admin"] else 0)
+                ed_u_pass = st.text_input("Nova Senha (Deixe em branco para manter a atual)", type="password")
                 
-                if st.form_submit_button("💾 Atualizar Cadastro de Usuário"):
-                    ok_e, msg_e = editar_usuario(sel_u_id, ed_u_nome.strip(), ed_u_perfil, ed_u_pwd.strip())
-                    if ok_e:
-                        st.success(msg_e)
+                if st.form_submit_button("💾 Atualizar Usuário"):
+                    ok, msg = editar_usuario(u_sel_id, ed_u_nome, ed_u_perf, ed_u_pass)
+                    if ok:
+                        st.success(msg)
                         st.rerun()
                     else:
-                        st.error(msg_e)
+                        st.error(msg)
 
 # --- ABA 11: PERSONALIZAR EMPRESA ---
 elif "Personalizar Empresa" in opcao:
-    st.title("🎨 Personalização da Empresa e Mapa do Almoxarifado")
+    st.title("🎨 Personalização da Empresa e Interface")
     
-    with st.form("form_personalizar"):
-        emp_nome = st.text_input("Nome da Empresa / Almoxarifado", value=config['nome_empresa'])
-        emp_cor = st.color_picker("Cor Principal do Tema", value=config['cor_tema'])
+    with st.form("form_config_empresa"):
+        e_nome = st.text_input("Nome da Empresa / Almoxarifado", value=config['nome_empresa'])
+        e_cor = st.color_picker("Cor do Tema da Interface", value=config['cor_tema'])
         
-        up_logo = st.file_uploader("Subir Logo da Empresa (Imagem)", type=["jpg", "png", "jpeg", "webp"])
-        up_mapa = st.file_uploader("Subir Layout / Mapa do Almoxarifado (PDF / Imagem / Excel)", type=["pdf", "jpg", "png", "jpeg", "webp", "xlsx", "xls"])
+        up_logo = st.file_uploader("Upload do Logo da Empresa (Imagem)", type=["png", "jpg", "jpeg", "webp"])
+        up_mapa = st.file_uploader("Upload do Layout/Mapa do Almoxarifado (PDF / Imagem)", type=["pdf", "png", "jpg", "jpeg", "webp", "xlsx", "xls"])
         
-        if st.form_submit_button("💾 Salvar Configurações Visuais", type="primary"):
-            l_path = config['logo_path']
-            m_path = config['mapa_path']
+        if st.form_submit_button("💾 Salvar Configurações", type="primary"):
+            caminho_logo = config['logo_path']
+            caminho_mapa = config['mapa_path']
             
             if up_logo is not None:
-                l_path = salvar_arquivo_seguro(up_logo, pasta_destino="uploads", tipo="imagem")
+                caminho_logo = salvar_arquivo_seguro(up_logo, pasta_destino="uploads", tipo="imagem")
             if up_mapa is not None:
-                m_path = salvar_arquivo_seguro(up_mapa, pasta_destino="uploads", tipo="mapa")
+                caminho_mapa = salvar_arquivo_seguro(up_mapa, pasta_destino="uploads", tipo="mapa")
                 
-            ok_c, msg_c = salvar_configuracoes(emp_nome, l_path, emp_cor, m_path)
-            if ok_c:
-                st.success(msg_c)
+            ok, msg = salvar_configuracoes(e_nome, caminho_logo, e_cor, caminho_mapa)
+            if ok:
+                st.success(msg)
                 st.rerun()
             else:
-                st.error(msg_c)
+                st.error(msg)
 
 # --- ABA 12: FOX ASSISTENTE ---
 elif "Fox Assistente" in opcao:
-    st.title("🦊 Fox - Assistente IA do Almoxarifado")
-    st.caption("Consulte sobre o estoque, tire dúvidas ou solicite resumos explicativos diretamente com a IA.")
+    st.title("🦊 Fox Assistente IA")
+    st.caption("Assistente virtual para auxílio do almoxarifado.")
     
     if client_gemini is None:
-        st.warning("⚠️ Chave de API do Gemini não configurada (`GEMINI_API_KEY` nos secrets).")
+        st.warning("⚠️ Chave de API do Gemini não configurada em `st.secrets['GEMINI_API_KEY']`.")
     else:
-        q_user = st.text_area("Pergunte algo sobre os dados do Almoxarifado:", placeholder="Ex: Qual o resumo dos itens zerados ou necessitando de compra urgente?")
-        if st.button("🦊 Perguntar ao Fox", type="primary"):
-            if q_user.strip():
-                df_p = buscar_produtos()
-                resumo_estoque = df_p.to_string(index=False) if not df_p.empty else "Estoque Vazio"
-                prompt_fox = f"Você é o Fox, assistente virtual inteligente do Almoxarifado da empresa '{config['nome_empresa']}'. Responda com base no estoque atual:\n\nESTOQUE:\n{resumo_estoque}\n\nPERGUNTA DO USUÁRIO:\n{q_user}"
+        pergunta = st.text_input("Pergunte algo sobre o seu estoque ou aplicativo:")
+        if st.button("Perguntar", type="primary") and pergunta.strip():
+            with st.spinner("Fox assistente pensando..."):
                 try:
                     res = client_gemini.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=prompt_fox
+                        model="gemini-2.5-flash",
+                        contents=f"Você é a Fox, uma assistente virtual de almoxarifado inteligente. Responda à dúvida do usuário de forma concisa e útil. Pergunta: {pergunta}"
                     )
-                    st.markdown(res.text)
+                    st.write("🦊 **Fox:**", res.text)
                 except Exception as e:
-                    st.error(f"Erro ao conectar com Fox Assistente: {tratar_erro(e)}")
-            else:
-                st.warning("Digite uma pergunta para a IA.")
+                    st.error(f"Erro ao consultar a IA: {e}")
